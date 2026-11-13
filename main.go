@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -18,8 +19,8 @@ func main() {
 		return
 	}
 
-	ctx := context.Background()
 	client := ollama.NewClient()
+	ctx := context.Background()
 
 	switch os.Args[1] {
 
@@ -47,40 +48,120 @@ func main() {
 			exitWithError(err)
 		}
 
+		// If a prompt is supplied, execute one-shot chat.
 		prompt := strings.Join(chatCmd.Args(), " ")
 
-		if strings.TrimSpace(prompt) == "" {
-			fmt.Println("Please provide a prompt.")
-			os.Exit(1)
-		}
-
-		requestCtx, cancel := context.WithTimeout(
-			ctx,
-			5*time.Minute,
-		)
-		defer cancel()
-
-		request := llm.ChatRequest{
-			Model: *model,
-			Messages: []llm.Message{
-				{
-					Role:    "user",
-					Content: prompt,
+		if prompt != "" {
+			request := llm.ChatRequest{
+				Model: *model,
+				Messages: []llm.Message{
+					{Role: "user", Content: prompt},
 				},
-			},
+			}
+
+			chatCtx, cancel := context.WithTimeout(
+				ctx, 5*time.Minute,
+			)
+			defer cancel()
+
+			response, err := client.Chat(chatCtx, request)
+			if err != nil {
+				exitWithError(err)
+			}
+
+			fmt.Println("\nTermAI:")
+			fmt.Println(response.Message.Content)
+			return
 		}
 
-		response, err := client.Chat(requestCtx, request)
-		if err != nil {
-			exitWithError(err)
-		}
-
-		fmt.Println("\nTermAI:")
-		fmt.Println(response.Message.Content)
+		// Otherwise start interactive chat.
+		startChat(client, *model)
 
 	default:
 		printUsage()
 	}
+}
+
+func startChat(client *ollama.Client, model string) {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	// Allow inputs up to 1 MB.
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+
+	// Conversation history.
+	history := []llm.Message{}
+
+	fmt.Println("\nWelcome to TermAI!")
+	fmt.Println("Provider:", "Ollama")
+	fmt.Println("Model:", model)
+	fmt.Println("Type /exit to quit, /clear to reset history.")
+	fmt.Println("--------------------------------------------")
+
+	for {
+		fmt.Print("\nYou > ")
+
+		if !scanner.Scan() {
+			break
+		}
+
+		input := strings.TrimSpace(scanner.Text())
+
+		if input == "" {
+			continue
+		}
+
+		// Handle commands.
+		switch input {
+		case "/exit":
+			fmt.Println("Goodbye!")
+			return
+
+		case "/clear":
+			history = []llm.Message{}
+			fmt.Println("Conversation history cleared.")
+			continue
+		}
+
+		// Add user message to history.
+		history = append(history, llm.Message{
+			Role:    "user",
+			Content: input,
+		})
+
+		// Create request.
+		request := llm.ChatRequest{
+			Model:    model,
+			Messages: history,
+		}
+
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Minute,
+		)
+
+		response, err := client.Chat(ctx, request)
+		cancel()
+
+		if err != nil {
+			fmt.Println("Error:", err)
+
+			// Remove failed user message.
+			history = history[:len(history)-1]
+			continue
+		}
+
+		// Add assistant response to history.
+		history = append(history, response.Message)
+
+		fmt.Println("\nTermAI >")
+		fmt.Println(response.Message.Content)
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "Input error:", err)
+	}
+
+	fmt.Println("\nGoodbye!")
 }
 
 func printUsage() {
@@ -89,8 +170,9 @@ TermAI - Your local AI terminal client
 
 Usage:
   termai models
+  termai chat
   termai chat "your prompt"
-  termai chat -m llama3.2:3b "your prompt"
+  termai chat -m llama3.2:3b
 `)
 }
 
