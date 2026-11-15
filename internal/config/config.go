@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -50,6 +52,43 @@ func DefaultPath() (string, error) {
 
 // Load reads the configuration file.
 // Missing files result in default configuration.
+// func Load(path string) (Config, error) {
+// 	cfg, err := Default()
+// 	if err != nil {
+// 		return Config{}, err
+// 	}
+
+// 	if path == "" {
+// 		path, err = DefaultPath()
+// 		if err != nil {
+// 			return Config{}, err
+// 		}
+// 	}
+
+// 	data, err := os.ReadFile(path)
+// 	if err != nil {
+// 		if errors.Is(err, os.ErrNotExist) {
+// 			return cfg, nil
+// 		}
+
+// 		return Config{}, fmt.Errorf("read configuration: %w", err)
+// 	}
+
+// 	// Unmarshal into defaults so omitted YAML fields retain defaults.
+// 	if err := yaml.Unmarshal(data, &cfg); err != nil {
+// 		return Config{}, fmt.Errorf("parse configuration: %w", err)
+// 	}
+
+// 	if err := cfg.Validate(); err != nil {
+// 		return Config{}, err
+// 	}
+
+// 	return cfg, nil
+// }
+
+// Load reads the configuration file.
+// Missing files result in default configuration.
+// Existing files are parsed strictly to catch unknown fields and malformed YAML.
 func Load(path string) (Config, error) {
 	cfg, err := Default()
 	if err != nil {
@@ -72,9 +111,30 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read configuration: %w", err)
 	}
 
-	// Unmarshal into defaults so omitted YAML fields retain defaults.
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return Config{}, errors.New("configuration file is empty")
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+
+	// Decode the configuration while rejecting unknown fields.
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse configuration: %w", err)
+	}
+
+	// Reject additional YAML documents.
+	var extra yaml.Node
+	err = decoder.Decode(&extra)
+
+	if err == nil {
+		return Config{}, errors.New(
+			"configuration must contain exactly one YAML document",
+		)
+	}
+
+	if !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("parse trailing configuration: %w", err)
 	}
 
 	if err := cfg.Validate(); err != nil {
