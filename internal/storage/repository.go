@@ -2,9 +2,12 @@ package storage
 
 import (
 	"context"
+	"errors"
 
 	conversation "github.com/Rugved7/termai/internal/conversation"
 )
+
+var ErrNotFound = errors.New("record not found")
 
 type SessionRepository interface {
 	CreateSession(
