@@ -52,5 +52,12 @@ type Store interface {
 	SessionRepository
 	MessageRepository
 
+	SaveExchange(
+		ctx context.Context,
+		session *conversation.Session,
+		userMessage *conversation.Message,
+		assistantMessage *conversation.Message,
+	) error
+
 	Close() error
 }

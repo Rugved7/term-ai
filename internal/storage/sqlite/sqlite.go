@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -64,6 +66,7 @@ func New(dataDir string) (*DB, error) {
 }
 
 func runMigrations(conn *sql.DB) error {
+	goose.SetLogger(log.New(io.Discard, "", 0))
 
 	goose.SetBaseFS(migrationFS)
 	defer goose.SetBaseFS(nil)

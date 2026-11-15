@@ -184,3 +184,146 @@ func TestRepositoryNotFound(t *testing.T) {
 		t.Errorf("Update() error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestSaveExchange(t *testing.T) {
+	db := newRepositoryTestDB(t)
+	ctx := context.Background()
+
+	session := &conversation.Session{
+		ID:       "exchange-session",
+		Title:    "New conversation",
+		Provider: "ollama",
+		Model:    "llama3.2:3b",
+	}
+
+	if err := db.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	userMessage := &conversation.Message{
+		SessionID: session.ID,
+		Role:      "user",
+		Content:   "Explain goroutines",
+	}
+
+	assistantMessage := &conversation.Message{
+		SessionID: session.ID,
+		Role:      "assistant",
+		Content:   "Goroutines are lightweight concurrent functions.",
+	}
+
+	session.Title = "Explain goroutines"
+
+	err := db.SaveExchange(
+		ctx,
+		session,
+		userMessage,
+		assistantMessage,
+	)
+	if err != nil {
+		t.Fatalf("SaveExchange() error = %v", err)
+	}
+
+	if userMessage.ID == 0 || assistantMessage.ID == 0 {
+		t.Fatal("SaveExchange() did not populate message IDs")
+	}
+
+	if userMessage.CreatedAt.IsZero() || assistantMessage.CreatedAt.IsZero() {
+		t.Fatal("SaveExchange() did not populate message timestamps")
+	}
+
+	messages, err := db.ListBySession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListBySession() error = %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(messages))
+	}
+
+	if messages[0].Role != "user" || messages[1].Role != "assistant" {
+		t.Fatalf("unexpected message order: %+v", messages)
+	}
+
+	savedSession, err := db.GetByID(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+
+	if savedSession.Title != "Explain goroutines" {
+		t.Fatalf("saved title = %q, want %q",
+			savedSession.Title, "Explain goroutines")
+	}
+}
+
+func TestSaveExchangeRollsBackOnFailure(t *testing.T) {
+	db := newRepositoryTestDB(t)
+	ctx := context.Background()
+
+	session := &conversation.Session{
+		ID:       "rollback-session",
+		Title:    "New conversation",
+		Provider: "ollama",
+		Model:    "llama3.2:3b",
+	}
+
+	if err := db.CreateSession(ctx, session); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	// Force the assistant insert to fail after the user insert succeeds.
+	_, err := db.conn.ExecContext(ctx, `
+		CREATE TRIGGER reject_assistant_message
+		BEFORE INSERT ON messages
+		WHEN NEW.role = 'assistant'
+		BEGIN
+			SELECT RAISE(ABORT, 'test failure');
+		END;
+	`)
+	if err != nil {
+		t.Fatalf("create test trigger: %v", err)
+	}
+
+	session.Title = "Should not be saved"
+
+	userMessage := &conversation.Message{
+		SessionID: session.ID,
+		Role:      "user",
+		Content:   "Hello",
+	}
+
+	assistantMessage := &conversation.Message{
+		SessionID: session.ID,
+		Role:      "assistant",
+		Content:   "Hello there",
+	}
+
+	err = db.SaveExchange(
+		ctx,
+		session,
+		userMessage,
+		assistantMessage,
+	)
+	if err == nil {
+		t.Fatal("SaveExchange() expected an error")
+	}
+
+	messages, err := db.ListBySession(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListBySession() error = %v", err)
+	}
+
+	if len(messages) != 0 {
+		t.Fatalf("got %d messages after rollback, want 0", len(messages))
+	}
+
+	savedSession, err := db.GetByID(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+
+	if savedSession.Title != "New conversation" {
+		t.Fatalf("title after rollback = %q, want %q",
+			savedSession.Title, "New conversation")
+	}
+}

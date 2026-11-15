@@ -29,7 +29,6 @@ func main() {
 	ctx := context.Background()
 
 	switch os.Args[1] {
-
 	case "models":
 		models, err := client.Models(ctx)
 		if err != nil {
@@ -44,11 +43,7 @@ func main() {
 	case "chat":
 		chatCmd := flag.NewFlagSet("chat", flag.ExitOnError)
 
-		model := chatCmd.String(
-			"m",
-			"llama3.2:3b",
-			"Model to use",
-		)
+		model := chatCmd.String("m", "llama3.2:3b", "Model to use")
 
 		if err := chatCmd.Parse(os.Args[2:]); err != nil {
 			exitWithError(err)
@@ -65,10 +60,7 @@ func main() {
 				},
 			}
 
-			chatCtx, cancel := context.WithTimeout(
-				ctx,
-				5*time.Minute,
-			)
+			chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 
 			response, err := client.Chat(chatCtx, request)
@@ -145,13 +137,11 @@ Welcome to TermAI
 		}
 
 		input := strings.TrimSpace(scanner.Text())
-
 		if input == "" {
 			continue
 		}
 
 		switch {
-
 		case input == "/exit":
 			fmt.Println("Goodbye!")
 			return
@@ -247,7 +237,6 @@ Welcome to TermAI
 			}
 
 			fmt.Println("\nRecent conversations:")
-
 			for i, savedSession := range sessions {
 				active := ""
 				if savedSession.ID == session.ID {
@@ -285,11 +274,7 @@ Welcome to TermAI
 				continue
 			}
 
-			savedHistory, err := loadChatHistory(
-				ctx,
-				store,
-				savedSession.ID,
-			)
+			savedHistory, err := loadChatHistory(ctx, store, savedSession.ID)
 			if err != nil {
 				fmt.Println("Unable to load conversation:", err)
 				continue
@@ -327,7 +312,7 @@ Welcome to TermAI
 			continue
 		}
 
-		// Construct the LLM request using existing history.
+		// Construct request using the current conversation history.
 		requestHistory := append(
 			append([]llm.Message{}, history...),
 			llm.Message{
@@ -341,10 +326,7 @@ Welcome to TermAI
 			Messages: requestHistory,
 		}
 
-		chatCtx, cancel := context.WithTimeout(
-			ctx,
-			5*time.Minute,
-		)
+		chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 
 		fmt.Print("\nTermAI > ")
 
@@ -364,41 +346,42 @@ Welcome to TermAI
 			continue
 		}
 
-		// Persist user message.
+		// Prepare updated session metadata.
+		updatedSession := *session
+
+		if updatedSession.Title == "New conversation" {
+			title := input
+			if len(title) > 60 {
+				title = title[:57] + "..."
+			}
+			updatedSession.Title = title
+		}
+
 		userMessage := &conversation.Message{
 			SessionID: session.ID,
 			Role:      "user",
 			Content:   input,
 		}
 
-		if err := store.CreateMessage(ctx, userMessage); err != nil {
-			fmt.Println("Warning: unable to save user message:", err)
-		}
-
-		// Persist assistant response.
 		assistantMessage := &conversation.Message{
 			SessionID: session.ID,
 			Role:      "assistant",
 			Content:   response.Message.Content,
 		}
 
-		if err := store.CreateMessage(ctx, assistantMessage); err != nil {
-			fmt.Println("Warning: unable to save assistant message:", err)
+		// Save both messages and session metadata atomically.
+		if err := store.SaveExchange(
+			ctx,
+			&updatedSession,
+			userMessage,
+			assistantMessage,
+		); err != nil {
+			fmt.Println("Warning: conversation exchange was not persisted:", err)
+		} else {
+			*session = updatedSession
 		}
 
-		// Set title from the first user prompt.
-		if session.Title == "New conversation" {
-			title := input
-			if len(title) > 60 {
-				title = title[:57] + "..."
-			}
-			session.Title = title
-		}
-
-		if err := store.Update(ctx, session); err != nil {
-			fmt.Println("Warning: unable to update session:", err)
-		}
-
+		// Keep in-memory history even if persistence fails.
 		history = append(
 			history,
 			llm.Message{
