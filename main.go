@@ -97,7 +97,7 @@ func startChat(provider llm.Provider, model string) {
 	// fmt.Println("Type /exit to quit, /clear to reset history.")
 	// fmt.Println("--------------------------------------------")
 
-	fmt.Println(`
+	fmt.Print(`
  _____                   ___
 |_   _|__ _ __ _ __ ___ |_ _|
   | |/ _ \ '__| '_ ' _ \ | |
@@ -264,7 +264,7 @@ Welcome to TermAI
 }
 
 func printUsage() {
-	fmt.Println(`
+	fmt.Print(`
 TermAI - Your local AI terminal client
 
 Usage:
