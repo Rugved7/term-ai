@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +33,11 @@ func newRootCmd() *cobra.Command {
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return configureLogger(cmd)
+		},
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
@@ -41,6 +49,12 @@ func newRootCmd() *cobra.Command {
 		"Path to a custom configuration file",
 	)
 
+	rootCmd.PersistentFlags().Bool(
+		"verbose",
+		false,
+		"Enable verbose debug logging",
+	)
+
 	rootCmd.AddCommand(
 		newModelsCmd(),
 		newChatCmd(),
@@ -49,6 +63,31 @@ func newRootCmd() *cobra.Command {
 	)
 
 	return rootCmd
+}
+
+// configureLogger configures structured logging.
+// Logs are written to stderr, keeping stdout clean.
+func configureLogger(cmd *cobra.Command) error {
+	verbose, err := cmd.Root().PersistentFlags().GetBool("verbose")
+	if err != nil {
+		return fmt.Errorf("read verbose flag: %w", err)
+	}
+
+	level := slog.LevelWarn
+	if verbose {
+		level = slog.LevelDebug
+	}
+
+	logger := slog.New(slog.NewTextHandler(
+		cmd.ErrOrStderr(),
+		&slog.HandlerOptions{
+			Level: level,
+		},
+	))
+
+	slog.SetDefault(logger)
+
+	return nil
 }
 
 // configPath returns the explicitly supplied config path, or the default path.
@@ -84,11 +123,71 @@ func loadAppConfig(cmd *cobra.Command) (config.Config, error) {
 	return cfg, nil
 }
 
+func formatOllamaError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf(
+			"%s timed out. Check whether Ollama is responding and try again",
+			operation,
+		)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%s was canceled", operation)
+	}
+
+	var apiErr *ollama.APIError
+	if errors.As(err, &apiErr) {
+		message := strings.TrimSpace(apiErr.Message)
+		lowerMessage := strings.ToLower(message)
+
+		if apiErr.StatusCode == http.StatusNotFound &&
+			strings.Contains(lowerMessage, "model") &&
+			strings.Contains(lowerMessage, "not found") {
+			return fmt.Errorf(
+				"model unavailable: %s. Pull the model with `ollama pull <model-name>` and verify it with `termai models`",
+				message,
+			)
+		}
+
+		return fmt.Errorf(
+			"%s failed: Ollama API returned HTTP %d: %s",
+			operation,
+			apiErr.StatusCode,
+			message,
+		)
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return fmt.Errorf(
+			"cannot resolve the configured Ollama endpoint while trying to %s: %w",
+			operation,
+			err,
+		)
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return fmt.Errorf(
+			"cannot reach Ollama while trying to %s. Ensure Ollama is running (`ollama serve`) and verify your configured endpoint: %w",
+			operation,
+			err,
+		)
+	}
+
+	return fmt.Errorf("%s failed: %w", operation, err)
+}
+
 func newModelsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "models",
 		Short: "List available Ollama models",
 		Args:  cobra.NoArgs,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadAppConfig(cmd)
 			if err != nil {
@@ -100,9 +199,11 @@ func newModelsCmd() *cobra.Command {
 				return fmt.Errorf("initialize Ollama client: %w", err)
 			}
 
+			slog.Debug("fetching available Ollama models")
+
 			models, err := client.Models(cmd.Context())
 			if err != nil {
-				return fmt.Errorf("list models: %w", err)
+				return formatOllamaError("list models", err)
 			}
 
 			fmt.Fprintln(cmd.OutOrStdout(), "Available models:")
@@ -178,6 +279,11 @@ func runChat(
 		return fmt.Errorf("initialize Ollama client: %w", err)
 	}
 
+	slog.Debug(
+		"initialized Ollama client",
+		"model", model,
+	)
+
 	prompt := strings.Join(args, " ")
 
 	// One-shot chat.
@@ -195,9 +301,11 @@ func runChat(
 		chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
+		slog.Debug("sending one-shot chat request", "model", model)
+
 		response, err := client.Chat(chatCtx, request)
 		if err != nil {
-			return fmt.Errorf("chat: %w", err)
+			return formatOllamaError("generate response", err)
 		}
 
 		fmt.Fprintln(cmd.OutOrStdout(), "\nTermAI:")
@@ -207,6 +315,8 @@ func runChat(
 	}
 
 	// Interactive chat requires persistent storage.
+	slog.Debug("initializing conversation storage")
+
 	store, err := sqlite.New(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("initialize storage: %w", err)
@@ -218,9 +328,7 @@ func runChat(
 		}
 	}()
 
-	startChat(client, model, store)
-
-	return nil
+	return startChat(ctx, client, model, store)
 }
 
 func newConfigCmd() *cobra.Command {
@@ -243,6 +351,7 @@ func newConfigInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Create the default configuration file",
 		Args:  cobra.NoArgs,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := configPath(cmd)
 			if err != nil {
@@ -273,6 +382,7 @@ func newConfigShowCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Display the effective configuration",
 		Args:  cobra.NoArgs,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadAppConfig(cmd)
 			if err != nil {
@@ -295,6 +405,7 @@ func newConfigPathCmd() *cobra.Command {
 		Use:   "path",
 		Short: "Print the configuration file path",
 		Args:  cobra.NoArgs,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := configPath(cmd)
 			if err != nil {
@@ -312,6 +423,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print TermAI version information",
 		Args:  cobra.NoArgs,
+
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(cmd.OutOrStdout(), "TermAI version: %s\n", version)
 			fmt.Fprintf(cmd.OutOrStdout(), "Git commit:     %s\n", commit)

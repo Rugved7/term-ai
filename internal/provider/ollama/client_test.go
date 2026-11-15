@@ -411,3 +411,91 @@ func TestChatRespectsContextCancellation(t *testing.T) {
 		t.Errorf("error = %v, want context.Canceled", err)
 	}
 }
+
+func TestHTTPResponsesReturnAPIError(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(*Client) error
+	}{
+		{
+			name: "Chat",
+			path: "/api/chat",
+			call: func(c *Client) error {
+				_, err := c.Chat(context.Background(), llm.ChatRequest{
+					Model: "missing-model",
+				})
+				return err
+			},
+		},
+		{
+			name: "Models",
+			path: "/api/tags",
+			call: func(c *Client) error {
+				_, err := c.Models(context.Background())
+				return err
+			},
+		},
+		{
+			name: "ChatStream",
+			path: "/api/chat",
+			call: func(c *Client) error {
+				_, err := c.ChatStream(
+					context.Background(),
+					llm.ChatRequest{Model: "missing-model"},
+					nil,
+				)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != tt.path {
+						t.Errorf("path = %q, want %q", r.URL.Path, tt.path)
+					}
+
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+
+					_, _ = fmt.Fprintln(w, `{"error":"model not found"}`)
+				},
+			))
+			defer server.Close()
+
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			err = tt.call(client)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error type = %T, want *APIError", err)
+			}
+
+			if apiErr.StatusCode != http.StatusNotFound {
+				t.Errorf(
+					"status code = %d, want %d",
+					apiErr.StatusCode,
+					http.StatusNotFound,
+				)
+			}
+
+			if apiErr.Message != "model not found" {
+				t.Errorf(
+					"message = %q, want %q",
+					apiErr.Message,
+					"model not found",
+				)
+			}
+		})
+	}
+}

@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -15,103 +17,70 @@ import (
 	"github.com/Rugved7/termai/internal/storage"
 )
 
-// func main() {
-// 	if len(os.Args) < 2 {
-// 		printUsage()
-// 		return
-// 	}
-
-// 	client := ollama.NewClient()
-// 	ctx := context.Background()
-
-// 	switch os.Args[1] {
-// 	case "models":
-// 		models, err := client.Models(ctx)
-// 		if err != nil {
-// 			exitWithError(err)
-// 		}
-
-// 		fmt.Println("Available models:")
-// 		for _, model := range models {
-// 			fmt.Println(" -", model)
-// 		}
-
-// 	case "chat":
-// 		chatCmd := flag.NewFlagSet("chat", flag.ExitOnError)
-
-// 		model := chatCmd.String("m", "llama3.2:3b", "Model to use")
-
-// 		if err := chatCmd.Parse(os.Args[2:]); err != nil {
-// 			exitWithError(err)
-// 		}
-
-// 		prompt := strings.Join(chatCmd.Args(), " ")
-
-// 		// One-shot chat.
-// 		if prompt != "" {
-// 			request := llm.ChatRequest{
-// 				Model: *model,
-// 				Messages: []llm.Message{
-// 					{Role: "user", Content: prompt},
-// 				},
-// 			}
-
-// 			chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-// 			defer cancel()
-
-// 			response, err := client.Chat(chatCtx, request)
-// 			if err != nil {
-// 				exitWithError(err)
-// 			}
-
-// 			fmt.Println("\nTermAI:")
-// 			fmt.Println(response.Message.Content)
-// 			return
-// 		}
-
-// 		// Initialize persistent storage.
-// 		homeDir, err := os.UserHomeDir()
-// 		if err != nil {
-// 			exitWithError(err)
-// 		}
-
-// 		dataDir := filepath.Join(homeDir, ".termai")
-
-// 		store, err := sqlite.New(dataDir)
-// 		if err != nil {
-// 			exitWithError(err)
-// 		}
-
-// 		defer func() {
-// 			if err := store.Close(); err != nil {
-// 				fmt.Fprintln(os.Stderr, "Database close error:", err)
-// 			}
-// 		}()
-
-// 		startChat(client, *model, store)
-
-// 	default:
-// 		printUsage()
-// 	}
-// }
-
-func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
-	}
+// inputResult carries terminal input from the scanner goroutine.
+type inputResult struct {
+	text string
+	err  error
+	ok   bool
 }
 
-func startChat(provider llm.Provider, model string, store storage.Store) {
+func main() {
+	os.Exit(run())
+}
+
+func run() int {
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+	)
+	defer stop()
+
+	rootCmd := newRootCmd()
+	rootCmd.SetContext(ctx)
+
+	if err := rootCmd.Execute(); err != nil {
+		// Ctrl+C is an expected shutdown, not an application failure.
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return 0
+		}
+
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		return 1
+	}
+
+	return 0
+}
+
+func startChat(
+	ctx context.Context,
+	provider llm.Provider,
+	model string,
+	store storage.Store,
+) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 
-	ctx := context.Background()
+	// Read terminal input in a separate goroutine so the main
+	// REPL loop can respond to context cancellation.
+	inputCh := make(chan inputResult, 1)
+
+	go func() {
+		for scanner.Scan() {
+			inputCh <- inputResult{
+				text: scanner.Text(),
+				ok:   true,
+			}
+		}
+
+		inputCh <- inputResult{
+			err: scanner.Err(),
+			ok:  false,
+		}
+	}()
 
 	session, err := createChatSession(ctx, store, model)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Unable to create chat session:", err)
-		return
+		return fmt.Errorf("initialize chat session: %w", err)
 	}
 
 	history := []llm.Message{}
@@ -120,7 +89,7 @@ func startChat(provider llm.Provider, model string, store storage.Store) {
  _____                   ___
 |_   _|__ _ __ _ __ ___ |_ _|
   | |/ _ \ '__| '_ ' _ \ | |
-  | |  __/ |  | | | | | || |
+  | |  __/ |  | | | | || |
   |_|\___|_|  |_| |_| |_|___|
 
 Welcome to TermAI
@@ -133,13 +102,33 @@ Welcome to TermAI
 	printChatCommands()
 
 	for {
-		fmt.Print("\nYou > ")
-
-		if !scanner.Scan() {
-			break
+		if ctx.Err() != nil {
+			fmt.Println("\nGoodbye!")
+			return nil
 		}
 
-		input := strings.TrimSpace(scanner.Text())
+		fmt.Print("\nYou > ")
+
+		var result inputResult
+
+		select {
+		case <-ctx.Done():
+			fmt.Println("\nGoodbye!")
+			return nil
+
+		case result = <-inputCh:
+		}
+
+		if !result.ok {
+			if result.err != nil {
+				return fmt.Errorf("read interactive input: %w", result.err)
+			}
+
+			fmt.Println("\nGoodbye!")
+			return nil
+		}
+
+		input := strings.TrimSpace(result.text)
 		if input == "" {
 			continue
 		}
@@ -147,11 +136,16 @@ Welcome to TermAI
 		switch {
 		case input == "/exit":
 			fmt.Println("Goodbye!")
-			return
+			return nil
 
 		case input == "/clear":
 			newSession, err := createChatSession(ctx, store, model)
 			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println("\nGoodbye!")
+					return nil
+				}
+
 				fmt.Println("Unable to create new session:", err)
 				continue
 			}
@@ -166,11 +160,17 @@ Welcome to TermAI
 		case input == "/models":
 			models, err := provider.Models(ctx)
 			if err != nil {
-				fmt.Println("Error:", err)
+				if ctx.Err() != nil {
+					fmt.Println("\nGoodbye!")
+					return nil
+				}
+
+				fmt.Println("Error:", formatOllamaError("list models", err))
 				continue
 			}
 
 			fmt.Println("\nAvailable models:")
+
 			for i, name := range models {
 				if name == model {
 					fmt.Printf("  %d. %s (active)\n", i+1, name)
@@ -178,6 +178,7 @@ Welcome to TermAI
 					fmt.Printf("  %d. %s\n", i+1, name)
 				}
 			}
+
 			continue
 
 		case input == "/model":
@@ -185,7 +186,9 @@ Welcome to TermAI
 			continue
 
 		case strings.HasPrefix(input, "/model "):
-			newModel := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
+			newModel := strings.TrimSpace(
+				strings.TrimPrefix(input, "/model "),
+			)
 
 			if newModel == "" {
 				fmt.Println("Please provide a model name.")
@@ -194,11 +197,17 @@ Welcome to TermAI
 
 			models, err := provider.Models(ctx)
 			if err != nil {
-				fmt.Println("Error:", err)
+				if ctx.Err() != nil {
+					fmt.Println("\nGoodbye!")
+					return nil
+				}
+
+				fmt.Println("Error:", formatOllamaError("list models", err))
 				continue
 			}
 
 			found := false
+
 			for _, name := range models {
 				if name == newModel {
 					found = true
@@ -214,6 +223,11 @@ Welcome to TermAI
 
 			newSession, err := createChatSession(ctx, store, newModel)
 			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println("\nGoodbye!")
+					return nil
+				}
+
 				fmt.Println("Unable to create new session:", err)
 				continue
 			}
@@ -240,8 +254,10 @@ Welcome to TermAI
 			}
 
 			fmt.Println("\nRecent conversations:")
+
 			for i, savedSession := range sessions {
 				active := ""
+
 				if savedSession.ID == session.ID {
 					active = " (active)"
 				}
@@ -256,6 +272,7 @@ Welcome to TermAI
 					savedSession.UpdatedAt.Local().Format("02 Jan 2006 15:04"),
 				)
 			}
+
 			continue
 
 		case strings.HasPrefix(input, "/resume"):
@@ -277,7 +294,11 @@ Welcome to TermAI
 				continue
 			}
 
-			savedHistory, err := loadChatHistory(ctx, store, savedSession.ID)
+			savedHistory, err := loadChatHistory(
+				ctx,
+				store,
+				savedSession.ID,
+			)
 			if err != nil {
 				fmt.Println("Unable to load conversation:", err)
 				continue
@@ -345,7 +366,12 @@ Welcome to TermAI
 		fmt.Println()
 
 		if err != nil {
-			fmt.Println("Error:", err)
+			if ctx.Err() != nil {
+				fmt.Println("Goodbye!")
+				return nil
+			}
+
+			fmt.Println("Error:", formatOllamaError("generate response", err))
 			continue
 		}
 
@@ -354,9 +380,11 @@ Welcome to TermAI
 
 		if updatedSession.Title == "New conversation" {
 			title := input
+
 			if len(title) > 60 {
 				title = title[:57] + "..."
 			}
+
 			updatedSession.Title = title
 		}
 
@@ -379,7 +407,15 @@ Welcome to TermAI
 			userMessage,
 			assistantMessage,
 		); err != nil {
-			fmt.Println("Warning: conversation exchange was not persisted:", err)
+			if ctx.Err() != nil {
+				fmt.Println("Goodbye!")
+				return nil
+			}
+
+			fmt.Println(
+				"Warning: conversation exchange was not persisted:",
+				err,
+			)
 		} else {
 			*session = updatedSession
 		}
@@ -394,12 +430,6 @@ Welcome to TermAI
 			response.Message,
 		)
 	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "Input error:", err)
-	}
-
-	fmt.Println("\nGoodbye!")
 }
 
 func createChatSession(
@@ -453,21 +483,4 @@ func printChatCommands() {
 	fmt.Println("  /delete <id>     Delete a conversation")
 	fmt.Println("  /clear           Start a new conversation")
 	fmt.Println("  /exit            Exit TermAI")
-}
-
-func printUsage() {
-	fmt.Print(`
-TermAI - Your local AI terminal client
-
-Usage:
-  termai models
-  termai chat
-  termai chat "your prompt"
-  termai chat -m llama3.2:3b
-`)
-}
-
-func exitWithError(err error) {
-	fmt.Fprintln(os.Stderr, "Error:", err)
-	os.Exit(1)
 }

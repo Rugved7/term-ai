@@ -19,6 +19,50 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
+// APIError represents an error returned by the Ollama HTTP API.
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf(
+		"Ollama returned HTTP %d: %s",
+		e.StatusCode,
+		e.Message,
+	)
+}
+
+const maxErrorBodySize = 64 * 1024
+
+// newAPIError extracts an error message from an Ollama HTTP response.
+func newAPIError(resp *http.Response) error {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+	if err != nil {
+		return fmt.Errorf("read Ollama error response: %w", err)
+	}
+
+	message := strings.TrimSpace(string(body))
+
+	var apiResponse struct {
+		Error string `json:"error"`
+	}
+
+	if json.Unmarshal(body, &apiResponse) == nil &&
+		strings.TrimSpace(apiResponse.Error) != "" {
+		message = strings.TrimSpace(apiResponse.Error)
+	}
+
+	if message == "" {
+		message = http.StatusText(resp.StatusCode)
+	}
+
+	return &APIError{
+		StatusCode: resp.StatusCode,
+		Message:    message,
+	}
+}
+
 func NewClient(baseURL string) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 
@@ -99,7 +143,7 @@ func (c *Client) Chat(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return llm.ChatResponse{}, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
+		return llm.ChatResponse{}, newAPIError(resp)
 	}
 
 	var result chatResponse
@@ -130,7 +174,7 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
+		return nil, newAPIError(resp)
 	}
 
 	var result tagsResponse
@@ -184,7 +228,7 @@ func (c *Client) ChatStream(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return llm.ChatResponse{}, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
+		return llm.ChatResponse{}, newAPIError(resp)
 	}
 
 	var fullResponse strings.Builder

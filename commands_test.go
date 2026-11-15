@@ -2,16 +2,21 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Rugved7/termai/internal/config"
+	"github.com/Rugved7/termai/internal/provider/ollama"
 	"gopkg.in/yaml.v3"
 )
 
@@ -435,5 +440,135 @@ func TestChatCommandRejectsEmptyModelOverride(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "model name cannot be empty") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFormatOllamaError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "deadline exceeded",
+			err:  context.DeadlineExceeded,
+			want: "timed out",
+		},
+		{
+			name: "context canceled",
+			err:  context.Canceled,
+			want: "was canceled",
+		},
+		{
+			name: "model not found",
+			err: &ollama.APIError{
+				StatusCode: http.StatusNotFound,
+				Message:    "model not found",
+			},
+			want: "ollama pull <model-name>",
+		},
+		{
+			name: "generic API error",
+			err: &ollama.APIError{
+				StatusCode: http.StatusInternalServerError,
+				Message:    "internal server error",
+			},
+			want: "HTTP 500",
+		},
+		{
+			name: "generic error",
+			err:  errors.New("unexpected failure"),
+			want: "unexpected failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatOllamaError("test operation", tt.err)
+
+			if got == nil {
+				t.Fatal("expected an error")
+			}
+
+			if !strings.Contains(got.Error(), tt.want) {
+				t.Errorf(
+					"error = %q, want it to contain %q",
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}
+
+func TestVerboseFlag(t *testing.T) {
+	cmd := newRootCmd()
+
+	flag := cmd.PersistentFlags().Lookup("verbose")
+	if flag == nil {
+		t.Fatal("expected --verbose persistent flag")
+	}
+
+	if flag.DefValue != "false" {
+		t.Fatalf("expected verbose disabled by default, got %q", flag.DefValue)
+	}
+}
+
+func TestConfigureLogger(t *testing.T) {
+	tests := []struct {
+		name    string
+		verbose bool
+		want    slog.Level
+	}{
+		{
+			name:    "default logging",
+			verbose: false,
+			want:    slog.LevelWarn,
+		},
+		{
+			name:    "verbose logging",
+			verbose: true,
+			want:    slog.LevelDebug,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newRootCmd()
+
+			if err := cmd.PersistentFlags().Set(
+				"verbose",
+				strconv.FormatBool(tt.verbose),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			original := slog.Default()
+			t.Cleanup(func() {
+				slog.SetDefault(original)
+			})
+
+			if err := configureLogger(cmd); err != nil {
+				t.Fatal(err)
+			}
+
+			if !slog.Default().Enabled(context.Background(), tt.want) {
+				t.Fatalf("expected logging level %s to be enabled", tt.want)
+			}
+
+			if tt.verbose && slog.Default().Enabled(
+				context.Background(),
+				slog.LevelDebug-4,
+			) {
+				t.Fatal("unexpected logging level below debug")
+			}
+
+			if !tt.verbose && slog.Default().Enabled(
+				context.Background(),
+				slog.LevelInfo,
+			) {
+				t.Fatal("info logging should be disabled by default")
+			}
+		})
 	}
 }
