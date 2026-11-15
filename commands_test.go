@@ -548,7 +548,7 @@ func TestConfigureLogger(t *testing.T) {
 				slog.SetDefault(original)
 			})
 
-			if err := configureLogger(cmd); err != nil {
+			if err := (cmd); err != nil {
 				t.Fatal(err)
 			}
 
