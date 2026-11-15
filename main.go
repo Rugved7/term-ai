@@ -6,11 +6,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/Rugved7/termai/internal/conversation"
 	"github.com/Rugved7/termai/internal/llm"
 	"github.com/Rugved7/termai/internal/provider/ollama"
+	"github.com/Rugved7/termai/internal/storage"
+	"github.com/Rugved7/termai/internal/storage/sqlite"
 )
 
 func main() {
@@ -48,9 +54,9 @@ func main() {
 			exitWithError(err)
 		}
 
-		// If a prompt is supplied, execute one-shot chat.
 		prompt := strings.Join(chatCmd.Args(), " ")
 
+		// One-shot chat.
 		if prompt != "" {
 			request := llm.ChatRequest{
 				Model: *model,
@@ -60,7 +66,8 @@ func main() {
 			}
 
 			chatCtx, cancel := context.WithTimeout(
-				ctx, 5*time.Minute,
+				ctx,
+				5*time.Minute,
 			)
 			defer cancel()
 
@@ -74,28 +81,45 @@ func main() {
 			return
 		}
 
-		// Otherwise start interactive chat.
-		startChat(client, *model)
+		// Initialize persistent storage.
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			exitWithError(err)
+		}
+
+		dataDir := filepath.Join(homeDir, ".termai")
+
+		store, err := sqlite.New(dataDir)
+		if err != nil {
+			exitWithError(err)
+		}
+
+		defer func() {
+			if err := store.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "Database close error:", err)
+			}
+		}()
+
+		startChat(client, *model, store)
 
 	default:
 		printUsage()
 	}
 }
 
-func startChat(provider llm.Provider, model string) {
+func startChat(provider llm.Provider, model string, store storage.Store) {
 	scanner := bufio.NewScanner(os.Stdin)
-
-	// Allow inputs up to 1 MB.
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 
-	// Conversation history.
-	history := []llm.Message{}
+	ctx := context.Background()
 
-	// fmt.Println("\nWelcome to TermAI!")
-	// fmt.Println("Provider:", "Ollama")
-	// fmt.Println("Model:", model)
-	// fmt.Println("Type /exit to quit, /clear to reset history.")
-	// fmt.Println("--------------------------------------------")
+	session, err := createChatSession(ctx, store, model)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Unable to create chat session:", err)
+		return
+	}
+
+	history := []llm.Message{}
 
 	fmt.Print(`
  _____                   ___
@@ -109,13 +133,9 @@ Welcome to TermAI
 
 	fmt.Println("Provider :", "Ollama")
 	fmt.Println("Model    :", model)
+	fmt.Println("Session  :", session.ID)
 
-	fmt.Println("\nCommands:")
-	fmt.Println("  /models          List available models")
-	fmt.Println("  /model           Show current model")
-	fmt.Println("  /model <name>    Switch model")
-	fmt.Println("  /clear           Clear conversation")
-	fmt.Println("  /exit            Exit TermAI")
+	printChatCommands()
 
 	for {
 		fmt.Print("\nYou > ")
@@ -130,27 +150,34 @@ Welcome to TermAI
 			continue
 		}
 
-		// Handle commands.
-
 		switch {
+
 		case input == "/exit":
 			fmt.Println("Goodbye!")
 			return
 
 		case input == "/clear":
+			newSession, err := createChatSession(ctx, store, model)
+			if err != nil {
+				fmt.Println("Unable to create new session:", err)
+				continue
+			}
+
+			session = newSession
 			history = []llm.Message{}
-			fmt.Println("Conversation history cleared.")
+
+			fmt.Println("Started a new conversation.")
+			fmt.Println("Session:", session.ID)
 			continue
 
 		case input == "/models":
-			models, err := provider.Models(context.Background())
+			models, err := provider.Models(ctx)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
 
 			fmt.Println("\nAvailable models:")
-
 			for i, name := range models {
 				if name == model {
 					fmt.Printf("  %d. %s (active)\n", i+1, name)
@@ -165,18 +192,20 @@ Welcome to TermAI
 			continue
 
 		case strings.HasPrefix(input, "/model "):
-			newModel := strings.TrimSpace(
-				strings.TrimPrefix(input, "/model "),
-			)
+			newModel := strings.TrimSpace(strings.TrimPrefix(input, "/model "))
 
-			models, err := provider.Models(context.Background())
+			if newModel == "" {
+				fmt.Println("Please provide a model name.")
+				continue
+			}
+
+			models, err := provider.Models(ctx)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
 
 			found := false
-
 			for _, name := range models {
 				if name == newModel {
 					found = true
@@ -190,49 +219,137 @@ Welcome to TermAI
 				continue
 			}
 
+			newSession, err := createChatSession(ctx, store, newModel)
+			if err != nil {
+				fmt.Println("Unable to create new session:", err)
+				continue
+			}
+
 			model = newModel
+			session = newSession
 			history = []llm.Message{}
 
 			fmt.Println("Switched model to:", model)
-			fmt.Println("Conversation history cleared.")
+			fmt.Println("Started a new conversation.")
+			fmt.Println("Session:", session.ID)
+			continue
+
+		case input == "/history":
+			sessions, err := store.List(ctx, 20)
+			if err != nil {
+				fmt.Println("Unable to retrieve history:", err)
+				continue
+			}
+
+			if len(sessions) == 0 {
+				fmt.Println("No saved conversations.")
+				continue
+			}
+
+			fmt.Println("\nRecent conversations:")
+
+			for i, savedSession := range sessions {
+				active := ""
+				if savedSession.ID == session.ID {
+					active = " (active)"
+				}
+
+				fmt.Printf(
+					"\n%d. %s%s\n   ID: %s\n   Model: %s | Updated: %s\n",
+					i+1,
+					savedSession.Title,
+					active,
+					savedSession.ID,
+					savedSession.Model,
+					savedSession.UpdatedAt.Local().Format("02 Jan 2006 15:04"),
+				)
+			}
+			continue
+
+		case strings.HasPrefix(input, "/resume"):
+			args := strings.Fields(input)
+
+			if len(args) != 2 || args[0] != "/resume" {
+				fmt.Println("Usage: /resume <session-id>")
+				continue
+			}
+
+			savedSession, err := store.GetByID(ctx, args[1])
+			if err != nil {
+				fmt.Println("Unable to find conversation:", err)
+				continue
+			}
+
+			if savedSession.Provider != "ollama" {
+				fmt.Println("Unsupported provider:", savedSession.Provider)
+				continue
+			}
+
+			savedHistory, err := loadChatHistory(
+				ctx,
+				store,
+				savedSession.ID,
+			)
+			if err != nil {
+				fmt.Println("Unable to load conversation:", err)
+				continue
+			}
+
+			session = savedSession
+			model = savedSession.Model
+			history = savedHistory
+
+			fmt.Println("Resumed conversation:", session.Title)
+			fmt.Println("Model:", model)
+			fmt.Printf("Loaded %d messages.\n", len(history))
+			continue
+
+		case strings.HasPrefix(input, "/delete"):
+			args := strings.Fields(input)
+
+			if len(args) != 2 || args[0] != "/delete" {
+				fmt.Println("Usage: /delete <session-id>")
+				continue
+			}
+
+			if args[1] == session.ID {
+				fmt.Println("Cannot delete the active conversation.")
+				fmt.Println("Use /clear to start a new conversation first.")
+				continue
+			}
+
+			if err := store.Delete(ctx, args[1]); err != nil {
+				fmt.Println("Unable to delete conversation:", err)
+				continue
+			}
+
+			fmt.Println("Conversation deleted.")
 			continue
 		}
 
-		// Add user message to history.
-		history = append(history, llm.Message{
-			Role:    "user",
-			Content: input,
-		})
-
-		// Create request.
-		request := llm.ChatRequest{
-			Model:    model,
-			Messages: history,
-		}
-
-		ctx, cancel := context.WithTimeout(
-			context.Background(),
-			5*time.Minute,
+		// Construct the LLM request using existing history.
+		requestHistory := append(
+			append([]llm.Message{}, history...),
+			llm.Message{
+				Role:    "user",
+				Content: input,
+			},
 		)
 
-		// response, err := client.Chat(ctx, request)
-		// cancel()
+		request := llm.ChatRequest{
+			Model:    model,
+			Messages: requestHistory,
+		}
 
-		// if err != nil {
-		// 	fmt.Println("Error:", err)
-
-		// 	// Remove failed user message.
-		// 	history = history[:len(history)-1]
-		// 	continue
-		// }
-
-		// // Add assistant response to history.
-		// history = append(history, response.Message)
+		chatCtx, cancel := context.WithTimeout(
+			ctx,
+			5*time.Minute,
+		)
 
 		fmt.Print("\nTermAI > ")
 
 		response, err := provider.ChatStream(
-			ctx,
+			chatCtx,
 			request,
 			func(chunk string) {
 				fmt.Print(chunk)
@@ -240,20 +357,56 @@ Welcome to TermAI
 		)
 
 		cancel()
-
 		fmt.Println()
 
 		if err != nil {
 			fmt.Println("Error:", err)
-
-			history = history[:len(history)-1]
 			continue
 		}
 
-		history = append(history, response.Message)
+		// Persist user message.
+		userMessage := &conversation.Message{
+			SessionID: session.ID,
+			Role:      "user",
+			Content:   input,
+		}
 
-		// fmt.Println("\nTermAI >")
-		// fmt.Println(response.Message.Content)
+		if err := store.CreateMessage(ctx, userMessage); err != nil {
+			fmt.Println("Warning: unable to save user message:", err)
+		}
+
+		// Persist assistant response.
+		assistantMessage := &conversation.Message{
+			SessionID: session.ID,
+			Role:      "assistant",
+			Content:   response.Message.Content,
+		}
+
+		if err := store.CreateMessage(ctx, assistantMessage); err != nil {
+			fmt.Println("Warning: unable to save assistant message:", err)
+		}
+
+		// Set title from the first user prompt.
+		if session.Title == "New conversation" {
+			title := input
+			if len(title) > 60 {
+				title = title[:57] + "..."
+			}
+			session.Title = title
+		}
+
+		if err := store.Update(ctx, session); err != nil {
+			fmt.Println("Warning: unable to update session:", err)
+		}
+
+		history = append(
+			history,
+			llm.Message{
+				Role:    "user",
+				Content: input,
+			},
+			response.Message,
+		)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -261,6 +414,59 @@ Welcome to TermAI
 	}
 
 	fmt.Println("\nGoodbye!")
+}
+
+func createChatSession(
+	ctx context.Context,
+	store storage.Store,
+	model string,
+) (*conversation.Session, error) {
+	session := &conversation.Session{
+		ID:       uuid.NewString(),
+		Title:    "New conversation",
+		Provider: "ollama",
+		Model:    model,
+	}
+
+	if err := store.CreateSession(ctx, session); err != nil {
+		return nil, fmt.Errorf("create chat session: %w", err)
+	}
+
+	return session, nil
+}
+
+func loadChatHistory(
+	ctx context.Context,
+	store storage.Store,
+	sessionID string,
+) ([]llm.Message, error) {
+	messages, err := store.ListBySession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load messages: %w", err)
+	}
+
+	history := make([]llm.Message, 0, len(messages))
+
+	for _, message := range messages {
+		history = append(history, llm.Message{
+			Role:    message.Role,
+			Content: message.Content,
+		})
+	}
+
+	return history, nil
+}
+
+func printChatCommands() {
+	fmt.Println("\nCommands:")
+	fmt.Println("  /models          List available models")
+	fmt.Println("  /model           Show current model")
+	fmt.Println("  /model <name>    Switch model")
+	fmt.Println("  /history         List saved conversations")
+	fmt.Println("  /resume <id>     Resume a conversation")
+	fmt.Println("  /delete <id>     Delete a conversation")
+	fmt.Println("  /clear           Start a new conversation")
+	fmt.Println("  /exit            Exit TermAI")
 }
 
 func printUsage() {
