@@ -22,5 +22,12 @@ type ChatResponse struct {
 // Provider defines the contract for every AI Provider
 type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (ChatResponse, error)
+
+	ChatStream(
+		ctx context.Context,
+		req ChatRequest,
+		onChunk func(string),
+	) (ChatResponse, error)
+
 	Models(ctx context.Context) ([]string, error)
 }

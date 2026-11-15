@@ -139,22 +139,45 @@ func startChat(client *ollama.Client, model string) {
 			5*time.Minute,
 		)
 
-		response, err := client.Chat(ctx, request)
+		// response, err := client.Chat(ctx, request)
+		// cancel()
+
+		// if err != nil {
+		// 	fmt.Println("Error:", err)
+
+		// 	// Remove failed user message.
+		// 	history = history[:len(history)-1]
+		// 	continue
+		// }
+
+		// // Add assistant response to history.
+		// history = append(history, response.Message)
+
+		fmt.Print("\nTermAI > ")
+
+		response, err := client.ChatStream(
+			ctx,
+			request,
+			func(chunk string) {
+				fmt.Print(chunk)
+			},
+		)
+
 		cancel()
+
+		fmt.Println()
 
 		if err != nil {
 			fmt.Println("Error:", err)
 
-			// Remove failed user message.
 			history = history[:len(history)-1]
 			continue
 		}
 
-		// Add assistant response to history.
 		history = append(history, response.Message)
 
-		fmt.Println("\nTermAI >")
-		fmt.Println(response.Message.Content)
+		// fmt.Println("\nTermAI >")
+		// fmt.Println(response.Message.Content)
 	}
 
 	if err := scanner.Err(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -34,6 +35,12 @@ type chatRequest struct {
 
 type chatResponse struct {
 	Message llm.Message `json:"message"`
+}
+
+type streamResponse struct {
+	Message llm.Message `json:"message"`
+	Done    bool        `json:"done"`
+	Error   string      `json:"error"`
 }
 
 func (c *Client) Chat(
@@ -134,4 +141,94 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	}
 
 	return models, nil
+}
+
+func (c *Client) ChatStream(
+	ctx context.Context,
+	req llm.ChatRequest,
+	onChunk func(string),
+) (llm.ChatResponse, error) {
+
+	payload := chatRequest{
+		Model:    req.Model,
+		Messages: req.Messages,
+		Stream:   true,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return llm.ChatResponse{}, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.BaseURL+"/api/chat",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return llm.ChatResponse{}, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return llm.ChatResponse{}, fmt.Errorf(
+			"ollama request failed: %w", err,
+		)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return llm.ChatResponse{}, fmt.Errorf(
+			"ollama returned HTTP %d", resp.StatusCode,
+		)
+	}
+
+	var fullResponse strings.Builder
+
+	decoder := json.NewDecoder(resp.Body)
+
+	for {
+		var chunk streamResponse
+
+		err := decoder.Decode(&chunk)
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return llm.ChatResponse{}, fmt.Errorf(
+				"failed to decode stream: %w", err,
+			)
+		}
+
+		if chunk.Error != "" {
+			return llm.ChatResponse{}, fmt.Errorf(
+				"ollama error: %s", chunk.Error,
+			)
+		}
+
+		// Print each generated text chunk immediately.
+		if chunk.Message.Content != "" {
+			fullResponse.WriteString(chunk.Message.Content)
+
+			if onChunk != nil {
+				onChunk(chunk.Message.Content)
+			}
+		}
+
+		if chunk.Done {
+			break
+		}
+	}
+
+	return llm.ChatResponse{
+		Message: llm.Message{
+			Role:    "assistant",
+			Content: fullResponse.String(),
+		},
+	}, nil
 }
