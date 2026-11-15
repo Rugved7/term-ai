@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,13 +19,28 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-func NewClient() *Client {
+func NewClient(baseURL string) (*Client, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Ollama base URL: %w", err)
+	}
+
+	if (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+		parsedURL.Host == "" {
+		return nil, fmt.Errorf(
+			"invalid Ollama base URL %q: expected an absolute HTTP or HTTPS URL",
+			baseURL,
+		)
+	}
+
 	return &Client{
-		BaseURL: "http://localhost:11434",
+		BaseURL: baseURL,
 		HTTPClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
-	}
+	}, nil
 }
 
 type chatRequest struct {
@@ -43,11 +59,16 @@ type streamResponse struct {
 	Error   string      `json:"error"`
 }
 
+type tagsResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
 func (c *Client) Chat(
 	ctx context.Context,
 	req llm.ChatRequest,
 ) (llm.ChatResponse, error) {
-
 	payload := chatRequest{
 		Model:    req.Model,
 		Messages: req.Messages,
@@ -56,7 +77,7 @@ func (c *Client) Chat(
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, fmt.Errorf("encode chat request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(
@@ -66,29 +87,24 @@ func (c *Client) Chat(
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, fmt.Errorf("create chat request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return llm.ChatResponse{}, fmt.Errorf(
-			"ollama request failed: %w", err,
-		)
+		return llm.ChatResponse{}, fmt.Errorf("Ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return llm.ChatResponse{}, fmt.Errorf(
-			"ollama returned HTTP %d", resp.StatusCode,
-		)
+		return llm.ChatResponse{}, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
 	}
 
 	var result chatResponse
-
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, fmt.Errorf("decode chat response: %w", err)
 	}
 
 	return llm.ChatResponse{
@@ -96,14 +112,7 @@ func (c *Client) Chat(
 	}, nil
 }
 
-type tagsResponse struct {
-	Models []struct {
-		Name string `json:"name"`
-	} `json:"models"`
-}
-
 func (c *Client) Models(ctx context.Context) ([]string, error) {
-
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -111,33 +120,30 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 		nil,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create models request: %w", err)
 	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"ollama request failed: %w", err,
-		)
+		return nil, fmt.Errorf("Ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"ollama returned HTTP %d", resp.StatusCode,
-		)
+		return nil, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
 	}
 
 	var result tagsResponse
-
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode models response: %w", err)
 	}
 
 	models := make([]string, 0, len(result.Models))
-
 	for _, model := range result.Models {
-		models = append(models, strings.TrimSpace(model.Name))
+		name := strings.TrimSpace(model.Name)
+		if name != "" {
+			models = append(models, name)
+		}
 	}
 
 	return models, nil
@@ -148,7 +154,6 @@ func (c *Client) ChatStream(
 	req llm.ChatRequest,
 	onChunk func(string),
 ) (llm.ChatResponse, error) {
-
 	payload := chatRequest{
 		Model:    req.Model,
 		Messages: req.Messages,
@@ -157,7 +162,7 @@ func (c *Client) ChatStream(
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, fmt.Errorf("encode chat request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(
@@ -167,51 +172,42 @@ func (c *Client) ChatStream(
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, fmt.Errorf("create chat request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return llm.ChatResponse{}, fmt.Errorf(
-			"ollama request failed: %w", err,
-		)
+		return llm.ChatResponse{}, fmt.Errorf("Ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return llm.ChatResponse{}, fmt.Errorf(
-			"ollama returned HTTP %d", resp.StatusCode,
-		)
+		return llm.ChatResponse{}, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
 	}
 
 	var fullResponse strings.Builder
-
 	decoder := json.NewDecoder(resp.Body)
 
 	for {
 		var chunk streamResponse
 
-		err := decoder.Decode(&chunk)
+		if err := decoder.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
 
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
 			return llm.ChatResponse{}, fmt.Errorf(
-				"failed to decode stream: %w", err,
+				"decode Ollama stream: %w",
+				err,
 			)
 		}
 
 		if chunk.Error != "" {
-			return llm.ChatResponse{}, fmt.Errorf(
-				"ollama error: %s", chunk.Error,
-			)
+			return llm.ChatResponse{}, fmt.Errorf("Ollama stream error: %s", chunk.Error)
 		}
 
-		// Print each generated text chunk immediately.
 		if chunk.Message.Content != "" {
 			fullResponse.WriteString(chunk.Message.Content)
 

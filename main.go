@@ -3,10 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
-	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,88 +12,93 @@ import (
 
 	"github.com/Rugved7/termai/internal/conversation"
 	"github.com/Rugved7/termai/internal/llm"
-	"github.com/Rugved7/termai/internal/provider/ollama"
 	"github.com/Rugved7/termai/internal/storage"
-	"github.com/Rugved7/termai/internal/storage/sqlite"
 )
 
+// func main() {
+// 	if len(os.Args) < 2 {
+// 		printUsage()
+// 		return
+// 	}
+
+// 	client := ollama.NewClient()
+// 	ctx := context.Background()
+
+// 	switch os.Args[1] {
+// 	case "models":
+// 		models, err := client.Models(ctx)
+// 		if err != nil {
+// 			exitWithError(err)
+// 		}
+
+// 		fmt.Println("Available models:")
+// 		for _, model := range models {
+// 			fmt.Println(" -", model)
+// 		}
+
+// 	case "chat":
+// 		chatCmd := flag.NewFlagSet("chat", flag.ExitOnError)
+
+// 		model := chatCmd.String("m", "llama3.2:3b", "Model to use")
+
+// 		if err := chatCmd.Parse(os.Args[2:]); err != nil {
+// 			exitWithError(err)
+// 		}
+
+// 		prompt := strings.Join(chatCmd.Args(), " ")
+
+// 		// One-shot chat.
+// 		if prompt != "" {
+// 			request := llm.ChatRequest{
+// 				Model: *model,
+// 				Messages: []llm.Message{
+// 					{Role: "user", Content: prompt},
+// 				},
+// 			}
+
+// 			chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+// 			defer cancel()
+
+// 			response, err := client.Chat(chatCtx, request)
+// 			if err != nil {
+// 				exitWithError(err)
+// 			}
+
+// 			fmt.Println("\nTermAI:")
+// 			fmt.Println(response.Message.Content)
+// 			return
+// 		}
+
+// 		// Initialize persistent storage.
+// 		homeDir, err := os.UserHomeDir()
+// 		if err != nil {
+// 			exitWithError(err)
+// 		}
+
+// 		dataDir := filepath.Join(homeDir, ".termai")
+
+// 		store, err := sqlite.New(dataDir)
+// 		if err != nil {
+// 			exitWithError(err)
+// 		}
+
+// 		defer func() {
+// 			if err := store.Close(); err != nil {
+// 				fmt.Fprintln(os.Stderr, "Database close error:", err)
+// 			}
+// 		}()
+
+// 		startChat(client, *model, store)
+
+// 	default:
+// 		printUsage()
+// 	}
+// }
+
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		return
-	}
-
-	client := ollama.NewClient()
-	ctx := context.Background()
-
-	switch os.Args[1] {
-	case "models":
-		models, err := client.Models(ctx)
-		if err != nil {
-			exitWithError(err)
-		}
-
-		fmt.Println("Available models:")
-		for _, model := range models {
-			fmt.Println(" -", model)
-		}
-
-	case "chat":
-		chatCmd := flag.NewFlagSet("chat", flag.ExitOnError)
-
-		model := chatCmd.String("m", "llama3.2:3b", "Model to use")
-
-		if err := chatCmd.Parse(os.Args[2:]); err != nil {
-			exitWithError(err)
-		}
-
-		prompt := strings.Join(chatCmd.Args(), " ")
-
-		// One-shot chat.
-		if prompt != "" {
-			request := llm.ChatRequest{
-				Model: *model,
-				Messages: []llm.Message{
-					{Role: "user", Content: prompt},
-				},
-			}
-
-			chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-
-			response, err := client.Chat(chatCtx, request)
-			if err != nil {
-				exitWithError(err)
-			}
-
-			fmt.Println("\nTermAI:")
-			fmt.Println(response.Message.Content)
-			return
-		}
-
-		// Initialize persistent storage.
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			exitWithError(err)
-		}
-
-		dataDir := filepath.Join(homeDir, ".termai")
-
-		store, err := sqlite.New(dataDir)
-		if err != nil {
-			exitWithError(err)
-		}
-
-		defer func() {
-			if err := store.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "Database close error:", err)
-			}
-		}()
-
-		startChat(client, *model, store)
-
-	default:
-		printUsage()
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
 	}
 }
 
