@@ -82,7 +82,7 @@ func main() {
 	}
 }
 
-func startChat(client *ollama.Client, model string) {
+func startChat(provider llm.Provider, model string) {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	// Allow inputs up to 1 MB.
@@ -91,11 +91,31 @@ func startChat(client *ollama.Client, model string) {
 	// Conversation history.
 	history := []llm.Message{}
 
-	fmt.Println("\nWelcome to TermAI!")
-	fmt.Println("Provider:", "Ollama")
-	fmt.Println("Model:", model)
-	fmt.Println("Type /exit to quit, /clear to reset history.")
-	fmt.Println("--------------------------------------------")
+	// fmt.Println("\nWelcome to TermAI!")
+	// fmt.Println("Provider:", "Ollama")
+	// fmt.Println("Model:", model)
+	// fmt.Println("Type /exit to quit, /clear to reset history.")
+	// fmt.Println("--------------------------------------------")
+
+	fmt.Println(`
+ _____                   ___
+|_   _|__ _ __ _ __ ___ |_ _|
+  | |/ _ \ '__| '_ ' _ \ | |
+  | |  __/ |  | | | | | || |
+  |_|\___|_|  |_| |_| |_|___|
+
+Welcome to TermAI
+`)
+
+	fmt.Println("Provider :", "Ollama")
+	fmt.Println("Model    :", model)
+
+	fmt.Println("\nCommands:")
+	fmt.Println("  /models          List available models")
+	fmt.Println("  /model           Show current model")
+	fmt.Println("  /model <name>    Switch model")
+	fmt.Println("  /clear           Clear conversation")
+	fmt.Println("  /exit            Exit TermAI")
 
 	for {
 		fmt.Print("\nYou > ")
@@ -111,13 +131,69 @@ func startChat(client *ollama.Client, model string) {
 		}
 
 		// Handle commands.
-		switch input {
-		case "/exit":
+
+		switch {
+		case input == "/exit":
 			fmt.Println("Goodbye!")
 			return
 
-		case "/clear":
+		case input == "/clear":
 			history = []llm.Message{}
+			fmt.Println("Conversation history cleared.")
+			continue
+
+		case input == "/models":
+			models, err := provider.Models(context.Background())
+			if err != nil {
+				fmt.Println("Error:", err)
+				continue
+			}
+
+			fmt.Println("\nAvailable models:")
+
+			for i, name := range models {
+				if name == model {
+					fmt.Printf("  %d. %s (active)\n", i+1, name)
+				} else {
+					fmt.Printf("  %d. %s\n", i+1, name)
+				}
+			}
+			continue
+
+		case input == "/model":
+			fmt.Println("Current model:", model)
+			continue
+
+		case strings.HasPrefix(input, "/model "):
+			newModel := strings.TrimSpace(
+				strings.TrimPrefix(input, "/model "),
+			)
+
+			models, err := provider.Models(context.Background())
+			if err != nil {
+				fmt.Println("Error:", err)
+				continue
+			}
+
+			found := false
+
+			for _, name := range models {
+				if name == newModel {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				fmt.Println("Model not found:", newModel)
+				fmt.Println("Use /models to see available models.")
+				continue
+			}
+
+			model = newModel
+			history = []llm.Message{}
+
+			fmt.Println("Switched model to:", model)
 			fmt.Println("Conversation history cleared.")
 			continue
 		}
@@ -155,7 +231,7 @@ func startChat(client *ollama.Client, model string) {
 
 		fmt.Print("\nTermAI > ")
 
-		response, err := client.ChatStream(
+		response, err := provider.ChatStream(
 			ctx,
 			request,
 			func(chunk string) {
