@@ -106,6 +106,7 @@ func TestModelsPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.BaseURL = server.URL
+	client.ModelsBaseURL = server.URL
 	client.HTTPClient = server.Client()
 
 	models, err := client.Models(context.Background())

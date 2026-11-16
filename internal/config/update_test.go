@@ -205,3 +205,82 @@ func TestSetDoesNotModifyFileOnInvalidUpdate(t *testing.T) {
 		t.Fatal("configuration file changed after failed update")
 	}
 }
+
+func TestInitializeCreatesConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "termai", "config.yaml")
+
+	err := Initialize(path, "gemini", "gemini-2.5-flash")
+	if err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Provider != "gemini" {
+		t.Errorf("provider = %q, want gemini", cfg.Provider)
+	}
+
+	if cfg.Model != "gemini-2.5-flash" {
+		t.Errorf("model = %q, want gemini-2.5-flash", cfg.Model)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("permissions = %04o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestInitializeRejectsExistingConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	if err := Initialize(path, "ollama", "llama3.2:3b"); err != nil {
+		t.Fatalf("first Initialize() error = %v", err)
+	}
+
+	err := Initialize(path, "gemini", "gemini-2.5-flash")
+	if err == nil {
+		t.Fatal("expected error when configuration already exists")
+	}
+
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Provider != "ollama" {
+		t.Errorf("existing provider changed to %q", cfg.Provider)
+	}
+}
+
+func TestInitializeRejectsInvalidProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	err := Initialize(path, "openai", "gpt-4o")
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatal("configuration file should not have been created")
+	}
+}
+
+func TestInitializeRejectsEmptyModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+
+	err := Initialize(path, "ollama", " ")
+	if err == nil {
+		t.Fatal("expected error for empty model")
+	}
+}

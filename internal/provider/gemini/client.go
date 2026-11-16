@@ -30,14 +30,16 @@ var interactionsModels = map[string]bool{
 }
 
 const (
-	defaultBaseURL = "https://generativelanguage.googleapis.com/v1"
-	maxErrorBody   = 64 * 1024
+	defaultBaseURL       = "https://generativelanguage.googleapis.com/v1beta"
+	defaultModelsBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+	maxErrorBody         = 64 * 1024
 )
 
 type Client struct {
-	APIKey     string
-	BaseURL    string
-	HTTPClient *http.Client
+	APIKey        string
+	BaseURL       string
+	ModelsBaseURL string
+	HTTPClient    *http.Client
 }
 
 func NewClient(apiKey string) (*Client, error) {
@@ -47,9 +49,10 @@ func NewClient(apiKey string) (*Client, error) {
 	}
 
 	return &Client{
-		APIKey:     apiKey,
-		BaseURL:    defaultBaseURL,
-		HTTPClient: &http.Client{},
+		APIKey:        apiKey,
+		BaseURL:       defaultBaseURL,
+		ModelsBaseURL: defaultModelsBaseURL,
+		HTTPClient:    &http.Client{},
 	}, nil
 }
 
@@ -99,15 +102,18 @@ type modelsResponse struct {
 
 type streamEvent struct {
 	EventType string `json:"event_type"`
-	Delta     struct {
+	Status    string `json:"status"`
+
+	Delta struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"delta"`
+
 	Error struct {
 		Message string `json:"message"`
+		Code    string `json:"code"`
 	} `json:"error"`
 }
-
 type apiErrorResponse struct {
 	Error struct {
 		Message string `json:"message"`
@@ -273,7 +279,7 @@ func (c *Client) Models(ctx context.Context) ([]string, error) {
 	pageToken := ""
 
 	for page := 0; page < maxPages; page++ {
-		endpoint := c.BaseURL + "/models"
+		endpoint := c.ModelsBaseURL + "/models"
 
 		httpReq, err := http.NewRequestWithContext(
 			ctx,
@@ -503,8 +509,9 @@ func (c *Client) ChatStream(
 			return nil
 		}
 
+		// [DONE] only marks the end of the SSE stream.
+		// Successful completion must be confirmed by an interaction event.
 		if data == "[DONE]" {
-			completed = true
 			eventName = ""
 			return nil
 		}
@@ -517,7 +524,6 @@ func (c *Client) ChatStream(
 		if event.EventType == "" {
 			event.EventType = eventName
 		}
-
 		eventName = ""
 
 		switch event.EventType {
@@ -530,17 +536,52 @@ func (c *Client) ChatStream(
 				}
 			}
 
+		case "interaction.status_update":
+			switch event.Status {
+			case "in_progress":
+				// Continue reading the stream.
+
+			case "completed":
+				completed = true
+
+			case "requires_action":
+				return errors.New(
+					"Gemini interaction requires an action, which TermAI does not support",
+				)
+
+			case "failed", "cancelled", "incomplete", "budget_exceeded":
+				return fmt.Errorf("Gemini interaction ended with status %q", event.Status)
+
+			default:
+				return fmt.Errorf(
+					"Gemini returned unknown interaction status %q",
+					event.Status,
+				)
+			}
+
 		case "interaction.completed":
 			completed = true
 
-		case "interaction.failed":
-			return fmt.Errorf("Gemini interaction failed")
+		case "interaction.failed",
+			"interaction.cancelled",
+			"interaction.incomplete":
+
+			return fmt.Errorf("Gemini interaction event: %s", event.EventType)
 
 		case "error":
+			if event.Error.Code != "" {
+				return fmt.Errorf(
+					"Gemini stream error (%s): %s",
+					event.Error.Code,
+					event.Error.Message,
+				)
+			}
+
 			if event.Error.Message != "" {
 				return fmt.Errorf("Gemini stream error: %s", event.Error.Message)
 			}
-			return fmt.Errorf("Gemini stream returned an error event")
+
+			return errors.New("Gemini stream returned an error event")
 		}
 
 		return nil

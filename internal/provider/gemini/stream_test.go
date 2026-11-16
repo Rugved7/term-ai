@@ -367,3 +367,32 @@ func TestChatStreamRejectsEmptyModel(t *testing.T) {
 		t.Fatal("expected empty model error")
 	}
 }
+
+func TestChatStreamDoneWithoutCompletion(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		fmt.Fprintln(w, "data: [DONE]")
+		fmt.Fprintln(w)
+	})
+
+	_, err := client.ChatStream(
+		context.Background(),
+		llm.ChatRequest{
+			Model: "gemini-test-model",
+			Messages: []llm.Message{
+				{Role: "user", Content: "Hello"},
+			},
+		},
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("expected error when stream ends without interaction.completed")
+	}
+
+	expected := "Gemini stream ended before interaction completed"
+	if !strings.Contains(err.Error(), expected) {
+		t.Errorf("expected error containing %q, got %q", expected, err)
+	}
+}

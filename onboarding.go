@@ -37,12 +37,8 @@ func runOnboarding(path string, input io.Reader, output io.Writer) error {
 		return fmt.Errorf("invalid selection %q: choose 1 or 2", strings.TrimSpace(choice))
 	}
 
-	if err := config.Set(path, "provider", provider); err != nil {
-		return fmt.Errorf("save provider configuration: %w", err)
-	}
-
-	if err := config.Set(path, "model", model); err != nil {
-		return fmt.Errorf("save model configuration: %w", err)
+	if err := config.Initialize(path, provider, model); err != nil {
+		return fmt.Errorf("initialize configuration: %w", err)
 	}
 
 	fmt.Fprintf(output, "\nTermAI configured to use %s.\n", provider)

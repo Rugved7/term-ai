@@ -24,6 +24,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	}
 
 	client.BaseURL = server.URL
+	client.ModelsBaseURL = server.URL
 	client.HTTPClient = server.Client()
 
 	return client
@@ -326,5 +327,83 @@ func TestChatContextCancellation(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected context cancellation error")
+	}
+}
+
+func TestModelsUsesModelsEndpoint(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %q, want GET", r.Method)
+		}
+
+		if r.URL.Path != "/models" {
+			t.Errorf("path = %q, want /models", r.URL.Path)
+		}
+
+		if r.Header.Get("x-goog-api-key") != "test-api-key" {
+			t.Error("missing API key header")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{
+			"models": [{
+				"name": "models/gemini-3.8-flash",
+				"supportedGenerationMethods": ["generateContent"]
+			}]
+		}`)
+	})
+
+	models, err := client.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models() error = %v", err)
+	}
+
+	if len(models) != 1 || models[0] != "gemini-3.8-flash" {
+		t.Errorf("unexpected models: %v", models)
+	}
+}
+
+func TestChatStreamTerminalStatuses(t *testing.T) {
+	statuses := []struct {
+		status string
+		want   string
+	}{
+		{"failed", "failed"},
+		{"cancelled", "cancelled"},
+		{"incomplete", "incomplete"},
+		{"budget_exceeded", "budget_exceeded"},
+		{"requires_action", "requires an action"},
+	}
+	for _, tt := range statuses {
+		t.Run(tt.status, func(t *testing.T) {
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+
+				fmt.Fprintf(w,
+					"event: interaction.status_update\n"+
+						"data: {\"event_type\":\"interaction.status_update\",\"status\":%q}\n\n",
+					tt.status,
+				)
+			})
+
+			_, err := client.ChatStream(
+				context.Background(),
+				llm.ChatRequest{
+					Model: "gemini-test-model",
+					Messages: []llm.Message{
+						{Role: "user", Content: "Hello"},
+					},
+				},
+				nil,
+			)
+
+			if err == nil {
+				t.Fatal("expected error for terminal status")
+			}
+
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("expected error containing %q, got %q", tt.want, err)
+			}
+		})
 	}
 }

@@ -60,6 +60,94 @@ func Set(path, key, value string) error {
 	return writeConfig(path, cfg)
 }
 
+// Initialize creates a configuration with the selected provider and model.
+// It refuses to overwrite an existing configuration.
+func Initialize(path, provider, model string) error {
+	if strings.TrimSpace(provider) == "" {
+		return errors.New("provider cannot be empty")
+	}
+
+	if strings.TrimSpace(model) == "" {
+		return errors.New("model cannot be empty")
+	}
+
+	if path == "" {
+		var err error
+		path, err = DefaultPath()
+		if err != nil {
+			return err
+		}
+	}
+
+	cfg, err := Default()
+	if err != nil {
+		return err
+	}
+
+	cfg.Provider = strings.TrimSpace(provider)
+	cfg.Model = strings.TrimSpace(model)
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return writeConfigExclusive(path, cfg)
+}
+
+// writeConfigExclusive atomically creates a configuration without replacing
+// an existing destination.
+func writeConfigExclusive(path string, cfg Config) error {
+	dir := filepath.Dir(path)
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create configuration directory: %w", err)
+	}
+
+	data, err := yaml.Marshal(&cfg)
+	if err != nil {
+		return fmt.Errorf("marshal configuration: %w", err)
+	}
+
+	tempFile, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary configuration: %w", err)
+	}
+
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if err := tempFile.Chmod(0600); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("set configuration permissions: %w", err)
+	}
+
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("write configuration: %w", err)
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("sync configuration: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("close temporary configuration: %w", err)
+	}
+
+	// os.Link publishes the completed file atomically and fails if
+	// the destination already exists.
+	if err := os.Link(tempPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("configuration already exists at %q", path)
+		}
+
+		return fmt.Errorf("create configuration at %q: %w", path, err)
+	}
+
+	return nil
+}
+
 func validateOllamaURL(rawURL string) error {
 	parsedURL, err := url.ParseRequestURI(rawURL)
 	if err != nil {
