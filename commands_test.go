@@ -207,11 +207,11 @@ func TestModelsCommand(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 
 			_, _ = fmt.Fprint(w, `{
-				"models": [
-					{"name": "llama3.2:3b"},
-					{"name": "codellama:7b"}
-				]
-			}`)
+					"models": [
+						{"name": "llama3.2:3b"},
+						{"name": "codellama:7b"}
+					]
+				}`)
 		},
 	))
 	defer server.Close()
@@ -331,11 +331,11 @@ func TestChatCommandUsesModelOverride(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 
 			_, _ = fmt.Fprint(w, `{
-				"message": {
-					"role": "assistant",
-					"content": "Dependency injection provides dependencies externally."
-				}
-			}`)
+					"message": {
+						"role": "assistant",
+						"content": "Dependency injection provides dependencies externally."
+					}
+				}`)
 		},
 	))
 	defer server.Close()
@@ -388,11 +388,11 @@ func TestChatCommandUsesConfiguredModel(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 
 			_, _ = fmt.Fprint(w, `{
-				"message": {
-					"role": "assistant",
-					"content": "Hello from configured model."
-				}
-			}`)
+					"message": {
+						"role": "assistant",
+						"content": "Hello from configured model."
+					}
+				}`)
 		},
 	))
 	defer server.Close()
@@ -548,9 +548,7 @@ func TestConfigureLogger(t *testing.T) {
 				slog.SetDefault(original)
 			})
 
-			if err := (cmd); err != nil {
-				t.Fatal(err)
-			}
+			configureLogger(cmd)
 
 			if !slog.Default().Enabled(context.Background(), tt.want) {
 				t.Fatalf("expected logging level %s to be enabled", tt.want)

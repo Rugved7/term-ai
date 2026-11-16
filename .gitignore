@@ -1,3 +1,5 @@
 *.db
 *.db-shm
 *.db-wal
+# Private product strategy — do not commit
+/product.md
