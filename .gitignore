@@ -3,3 +3,7 @@
 *.db-wal
 # Private product strategy — do not commit
 /product.md
+
+# Build artifacts
+/dist/
+
