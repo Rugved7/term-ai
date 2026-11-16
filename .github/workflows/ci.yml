@@ -15,34 +15,6 @@ jobs:
     name: Test and Build
     runs-on: ubuntu-latest
 
-  
-  cross-platform-build:
-    name: Cross-platform builds
-    needs: test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build all platforms
-        run: ./scripts/build.sh
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: termai-binaries
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 14
-
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -76,3 +48,29 @@ jobs:
 
       - name: Build
         run: go build -v ./...
+
+  cross-platform-build:
+    name: Cross-platform builds
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build all platforms
+        run: ./scripts/build.sh
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: termai-binaries
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
