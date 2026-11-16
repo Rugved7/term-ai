@@ -109,6 +109,7 @@ func TestInteractiveChatPersistsExchange(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,
@@ -197,6 +198,7 @@ func TestInteractiveChatMaintainsConversationHistory(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,
@@ -293,6 +295,7 @@ func TestInteractiveChatResumesConversation(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		firstInput,
@@ -325,6 +328,7 @@ func TestInteractiveChatResumesConversation(t *testing.T) {
 	err = startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		secondInput,
@@ -421,6 +425,7 @@ func TestInteractiveChatRecoversFromProviderError(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,
@@ -498,6 +503,7 @@ func TestInteractiveChatIgnoresEmptyInput(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,
@@ -553,6 +559,7 @@ func TestInteractiveChatClearStartsNewSession(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,
@@ -640,6 +647,7 @@ func TestInteractiveChatHandlesInvalidResume(t *testing.T) {
 	err := startChatWithIO(
 		ctx,
 		provider,
+		"ollama",
 		"test-model",
 		store,
 		input,

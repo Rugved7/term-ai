@@ -176,7 +176,7 @@ func TestConfigShowRejectsUnsupportedProvider(t *testing.T) {
 		t,
 		"http://localhost:11434",
 		"test-model",
-		"openai",
+		"unsupported-provider", // Changed from openai
 	)
 
 	_, _, err := executeCommand(
@@ -443,7 +443,7 @@ func TestChatCommandRejectsEmptyModelOverride(t *testing.T) {
 	}
 }
 
-func TestFormatOllamaError(t *testing.T) {
+func TestFormatProviderError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -484,7 +484,7 @@ func TestFormatOllamaError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatOllamaError("test operation", tt.err)
+			got := formatProviderError("ollama", "test operation", tt.err)
 
 			if got == nil {
 				t.Fatal("expected an error")
@@ -568,5 +568,159 @@ func TestConfigureLogger(t *testing.T) {
 				t.Fatal("info logging should be disabled by default")
 			}
 		})
+	}
+}
+
+func TestConfigSetProvider(t *testing.T) {
+	path := writeTestConfig(
+		t,
+		"http://localhost:11434",
+		"llama3.2:3b",
+		"ollama",
+	)
+
+	stdout, _, err := executeCommand(
+		"--config", path,
+		"config", "set", "provider", "gemini",
+	)
+
+	if err != nil {
+		t.Fatalf("config set provider: %v", err)
+	}
+
+	if !strings.Contains(stdout, "provider = gemini") {
+		t.Errorf("unexpected output: %s", stdout)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "gemini" {
+		t.Errorf("provider = %q, want gemini", cfg.Provider)
+	}
+
+	if cfg.Model != "llama3.2:3b" {
+		t.Errorf("model changed unexpectedly: %q", cfg.Model)
+	}
+}
+
+func TestConfigSetModel(t *testing.T) {
+	path := writeTestConfig(
+		t,
+		"http://localhost:11434",
+		"llama3.2:3b",
+		"gemini",
+	)
+
+	_, _, err := executeCommand(
+		"--config", path,
+		"config", "set", "model", "gemini-2.5-flash",
+	)
+
+	if err != nil {
+		t.Fatalf("config set model: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Model != "gemini-2.5-flash" {
+		t.Errorf("model = %q, want gemini-2.5-flash", cfg.Model)
+	}
+}
+func TestConfigSetRejectsInvalidProvider(t *testing.T) {
+	path := writeTestConfig(
+		t,
+		"http://localhost:11434",
+		"llama3.2:3b",
+		"ollama",
+	)
+
+	_, _, err := executeCommand(
+		"--config", path,
+		"config", "set", "provider", "openai",
+	)
+
+	if err == nil {
+		t.Fatal("expected invalid provider error")
+	}
+
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+
+	if cfg.Provider != "ollama" {
+		t.Errorf("provider changed unexpectedly: %q", cfg.Provider)
+	}
+}
+
+func TestConfigSetRejectsMissingArguments(t *testing.T) {
+	_, _, err := executeCommand(
+		"config", "set", "provider",
+	)
+
+	if err == nil {
+		t.Fatal("expected missing argument error")
+	}
+}
+
+func TestConfigSetUsesCustomConfigPath(t *testing.T) {
+	customPath := writeTestConfig(
+		t,
+		"http://localhost:11434",
+		"llama3.2:3b",
+		"ollama",
+	)
+
+	_, _, err := executeCommand(
+		"--config", customPath,
+		"config", "set", "provider", "gemini",
+	)
+
+	if err != nil {
+		t.Fatalf("config set with custom path: %v", err)
+	}
+
+	cfg, err := config.Load(customPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "gemini" {
+		t.Errorf("custom config provider = %q, want gemini", cfg.Provider)
+	}
+}
+
+func TestConfigShowAfterSet(t *testing.T) {
+	path := writeTestConfig(
+		t,
+		"http://localhost:11434",
+		"llama3.2:3b",
+		"ollama",
+	)
+
+	_, _, err := executeCommand(
+		"--config", path,
+		"config", "set", "provider", "gemini",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCommand(
+		"--config", path,
+		"config", "show",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(stdout, "provider: gemini") {
+		t.Errorf("config show did not reflect updated provider: %s", stdout)
 	}
 }

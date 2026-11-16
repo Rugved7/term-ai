@@ -13,9 +13,11 @@ import (
 
 	"github.com/Rugved7/termai/internal/config"
 	"github.com/Rugved7/termai/internal/llm"
+	"github.com/Rugved7/termai/internal/provider/factory"
 	"github.com/Rugved7/termai/internal/provider/ollama"
 	"github.com/Rugved7/termai/internal/storage/sqlite"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -115,6 +117,27 @@ func loadAppConfig(cmd *cobra.Command) (config.Config, error) {
 		return config.Config{}, err
 	}
 
+	_, err = os.Stat(path)
+
+	if errors.Is(err, os.ErrNotExist) {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return config.Config{}, fmt.Errorf(
+				"configuration not found at %q; run `termai config init` or launch TermAI from an interactive terminal",
+				path,
+			)
+		}
+
+		if err := runOnboarding(
+			path,
+			cmd.InOrStdin(),
+			cmd.OutOrStdout(),
+		); err != nil {
+			return config.Config{}, err
+		}
+	} else if err != nil {
+		return config.Config{}, fmt.Errorf("check configuration file: %w", err)
+	}
+
 	cfg, err := config.Load(path)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("load configuration: %w", err)
@@ -123,14 +146,15 @@ func loadAppConfig(cmd *cobra.Command) (config.Config, error) {
 	return cfg, nil
 }
 
-func formatOllamaError(operation string, err error) error {
+func formatProviderError(provider, operation string, err error) error {
 	if err == nil {
 		return nil
 	}
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf(
-			"%s timed out. Check whether Ollama is responding and try again",
+			"%s timed out while trying to %s",
+			provider,
 			operation,
 		)
 	}
@@ -139,44 +163,45 @@ func formatOllamaError(operation string, err error) error {
 		return fmt.Errorf("%s was canceled", operation)
 	}
 
-	var apiErr *ollama.APIError
-	if errors.As(err, &apiErr) {
-		message := strings.TrimSpace(apiErr.Message)
-		lowerMessage := strings.ToLower(message)
+	// Ollama-specific errors.
+	if provider == "ollama" {
+		var apiErr *ollama.APIError
+		if errors.As(err, &apiErr) {
+			message := strings.TrimSpace(apiErr.Message)
+			lowerMessage := strings.ToLower(message)
 
-		if apiErr.StatusCode == http.StatusNotFound &&
-			strings.Contains(lowerMessage, "model") &&
-			strings.Contains(lowerMessage, "not found") {
+			if apiErr.StatusCode == http.StatusNotFound &&
+				strings.Contains(lowerMessage, "model") &&
+				strings.Contains(lowerMessage, "not found") {
+				return fmt.Errorf(
+					"model unavailable: %s. Pull it using `ollama pull <model-name>` and verify it with `termai models`",
+					message,
+				)
+			}
+
 			return fmt.Errorf(
-				"model unavailable: %s. Pull the model with `ollama pull <model-name>` and verify it with `termai models`",
+				"%s failed: Ollama API returned HTTP %d: %s",
+				operation,
+				apiErr.StatusCode,
 				message,
 			)
 		}
 
-		return fmt.Errorf(
-			"%s failed: Ollama API returned HTTP %d: %s",
-			operation,
-			apiErr.StatusCode,
-			message,
-		)
-	}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return fmt.Errorf(
+				"cannot resolve the configured Ollama endpoint: %w",
+				err,
+			)
+		}
 
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return fmt.Errorf(
-			"cannot resolve the configured Ollama endpoint while trying to %s: %w",
-			operation,
-			err,
-		)
-	}
-
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return fmt.Errorf(
-			"cannot reach Ollama while trying to %s. Ensure Ollama is running (`ollama serve`) and verify your configured endpoint: %w",
-			operation,
-			err,
-		)
+		var opErr *net.OpError
+		if errors.As(err, &opErr) {
+			return fmt.Errorf(
+				"cannot reach Ollama. Ensure it is running (`ollama serve`) and verify the configured endpoint: %w",
+				err,
+			)
+		}
 	}
 
 	return fmt.Errorf("%s failed: %w", operation, err)
@@ -185,7 +210,7 @@ func formatOllamaError(operation string, err error) error {
 func newModelsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "models",
-		Short: "List available Ollama models",
+		Short: "List models available from the configured provider",
 		Args:  cobra.NoArgs,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -194,16 +219,25 @@ func newModelsCmd() *cobra.Command {
 				return err
 			}
 
-			client, err := ollama.NewClient(cfg.Ollama.BaseURL)
+			// client, err := ollama.NewClient(cfg.Ollama.BaseURL)
+			// if err != nil {
+			// 	return fmt.Errorf("initialize Ollama client: %w", err)
+			// }
+
+			provider, err := factory.New(cfg)
 			if err != nil {
-				return fmt.Errorf("initialize Ollama client: %w", err)
+				return err
 			}
 
-			slog.Debug("fetching available Ollama models")
+			slog.Debug(
+				"fetching available models",
+				"provider", cfg.Provider,
+			)
 
-			models, err := client.Models(cmd.Context())
+			// models, err := client.Models(cmd.Context())
+			models, err := provider.Models(cmd.Context())
 			if err != nil {
-				return formatOllamaError("list models", err)
+				return formatProviderError(cfg.Provider, "list models", err)
 			}
 
 			fmt.Fprintln(cmd.OutOrStdout(), "Available models:")
@@ -274,13 +308,18 @@ func runChat(
 ) error {
 	ctx := cmd.Context()
 
-	client, err := ollama.NewClient(cfg.Ollama.BaseURL)
+	// client, err := ollama.NewClient(cfg.Ollama.BaseURL)
+	// if err != nil {
+	// 	return fmt.Errorf("initialize Ollama client: %w", err)
+	// }
+
+	provider, err := factory.New(cfg)
 	if err != nil {
-		return fmt.Errorf("initialize Ollama client: %w", err)
+		return err
 	}
 
 	slog.Debug(
-		"initialized Ollama client",
+		"initialized provider",
 		"model", model,
 	)
 
@@ -301,11 +340,21 @@ func runChat(
 		chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
-		slog.Debug("sending one-shot chat request", "model", model)
+		slog.Debug(
+			"initialized provider",
+			"provider", cfg.Provider,
+			"model", model,
+		)
 
-		response, err := client.Chat(chatCtx, request)
+		// response, err := client.Chat(chatCtx, request)
+		response, err := provider.Chat(chatCtx, request)
+
 		if err != nil {
-			return formatOllamaError("generate response", err)
+			return formatProviderError(
+				cfg.Provider,
+				"generate response",
+				err,
+			)
 		}
 
 		fmt.Fprintln(cmd.OutOrStdout(), "\nTermAI:")
@@ -328,7 +377,9 @@ func runChat(
 		}
 	}()
 
-	return startChat(ctx, client, model, store)
+	// return startChat(ctx, client, model, store)
+	// return startChat(ctx, provider, model, store)
+	return startChat(ctx, provider, cfg.Provider, model, store)
 }
 
 func newConfigCmd() *cobra.Command {
@@ -341,6 +392,7 @@ func newConfigCmd() *cobra.Command {
 		newConfigInitCmd(),
 		newConfigShowCmd(),
 		newConfigPathCmd(),
+		newConfigSetCmd(),
 	)
 
 	return cmd
@@ -428,6 +480,49 @@ func newVersionCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "TermAI version: %s\n", version)
 			fmt.Fprintf(cmd.OutOrStdout(), "Git commit:     %s\n", commit)
 			fmt.Fprintf(cmd.OutOrStdout(), "Build date:     %s\n", buildDate)
+		},
+	}
+}
+
+func newConfigSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Update a configuration setting",
+		Long: `Update a TermAI configuration setting.
+
+Supported settings:
+  provider          ollama or gemini
+  model             Model identifier
+  ollama.base_url   Ollama server URL
+
+Examples:
+  termai config set provider gemini
+  termai config set model gemini-2.5-flash
+  termai config set provider ollama
+  termai config set ollama.base_url http://localhost:11434`,
+		Args: cobra.ExactArgs(2),
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := configPath(cmd)
+			if err != nil {
+				return err
+			}
+
+			key := args[0]
+			value := args[1]
+
+			if err := config.Set(path, key, value); err != nil {
+				return fmt.Errorf("update configuration: %w", err)
+			}
+
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Configuration updated: %s = %s\n",
+				key,
+				value,
+			)
+
+			return nil
 		},
 	}
 }

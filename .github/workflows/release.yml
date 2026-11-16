@@ -59,3 +59,4 @@ jobs:
             dist/SHA256SUMS \
             --title "TermAI ${GITHUB_REF_NAME}" \
             --generate-notes
+on

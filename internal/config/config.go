@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,6 +90,7 @@ func DefaultPath() (string, error) {
 // Load reads the configuration file.
 // Missing files result in default configuration.
 // Existing files are parsed strictly to catch unknown fields and malformed YAML.
+
 func Load(path string) (Config, error) {
 	cfg, err := Default()
 	if err != nil {
@@ -146,26 +148,34 @@ func Load(path string) (Config, error) {
 
 // Validate checks whether the configuration is usable.
 func (c Config) Validate() error {
-	if c.Provider != "ollama" {
-		return fmt.Errorf("unsupported provider %q", c.Provider)
+	switch c.Provider {
+	case "ollama", "gemini":
+		// Supported in v1.0.
+	default:
+		return fmt.Errorf(
+			"unsupported provider %q: supported providers are ollama and gemini",
+			c.Provider,
+		)
 	}
 
-	if c.Model == "" {
+	if strings.TrimSpace(c.Model) == "" {
 		return errors.New("model cannot be empty")
 	}
 
-	if c.DataDir == "" {
+	if strings.TrimSpace(c.DataDir) == "" {
 		return errors.New("data directory cannot be empty")
 	}
 
-	parsedURL, err := url.ParseRequestURI(c.Ollama.BaseURL)
-	if err != nil {
-		return fmt.Errorf("invalid Ollama URL: %w", err)
-	}
+	if c.Provider == "ollama" {
+		parsedURL, err := url.ParseRequestURI(c.Ollama.BaseURL)
+		if err != nil {
+			return fmt.Errorf("invalid Ollama URL: %w", err)
+		}
 
-	if (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
-		parsedURL.Host == "" {
-		return errors.New("Ollama URL must be an absolute HTTP or HTTPS URL")
+		if (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+			parsedURL.Host == "" {
+			return errors.New("Ollama URL must be an absolute HTTP or HTTPS URL")
+		}
 	}
 
 	return nil

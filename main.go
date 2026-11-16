@@ -431,12 +431,14 @@ func run() int {
 func startChat(
 	ctx context.Context,
 	provider llm.Provider,
+	providerName string,
 	model string,
 	store storage.Store,
 ) error {
 	return startChatWithIO(
 		ctx,
 		provider,
+		providerName,
 		model,
 		store,
 		os.Stdin,
@@ -447,6 +449,7 @@ func startChat(
 func startChatWithIO(
 	ctx context.Context,
 	provider llm.Provider,
+	providerName string,
 	model string,
 	store storage.Store,
 	input io.Reader,
@@ -570,7 +573,7 @@ Welcome to TermAI
 					return nil
 				}
 
-				fmt.Fprintln(output, "Error:", formatOllamaError("list models", err))
+				fmt.Fprintln(output, "Error:", formatProviderError(providerName, "list models", err))
 				continue
 			}
 
@@ -607,7 +610,7 @@ Welcome to TermAI
 					return nil
 				}
 
-				fmt.Fprintln(output, "Error:", formatOllamaError("list models", err))
+				fmt.Fprintln(output, "Error:", formatProviderError(providerName, "list models", err))
 				continue
 			}
 
@@ -770,7 +773,7 @@ Welcome to TermAI
 				return nil
 			}
 
-			fmt.Fprintln(output, "Error:", formatOllamaError("generate response", err))
+			fmt.Fprintln(output, "Error:", formatProviderError(providerName, "list models", err))
 			continue
 		}
 

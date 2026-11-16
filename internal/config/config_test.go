@@ -229,3 +229,83 @@ ollama:
 		t.Fatal("expected duplicate YAML key error")
 	}
 }
+
+func TestValidateAcceptsSupportedProviders(t *testing.T) {
+	providers := []string{
+		"ollama",
+		"gemini",
+	}
+
+	for _, provider := range providers {
+		t.Run(provider, func(t *testing.T) {
+			cfg, err := Default()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg.Provider = provider
+
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf(
+					"expected provider %q to be valid: %v",
+					provider,
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestValidateCloudProviderDoesNotRequireOllamaURL(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Provider = "gemini"
+	cfg.Ollama.BaseURL = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cloud configuration should not require Ollama URL: %v", err)
+	}
+}
+
+func TestValidateRejectsEmptyModel(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Model = " "
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected empty model error")
+	}
+}
+
+func TestValidateRejectsUnimplementedProviders(t *testing.T) {
+	providers := []string{
+		"openai",
+		"anthropic",
+		"groq",
+		"unknown",
+	}
+
+	for _, provider := range providers {
+		t.Run(provider, func(t *testing.T) {
+			cfg, err := Default()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg.Provider = provider
+
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf(
+					"expected provider %q to be rejected",
+					provider,
+				)
+			}
+		})
+	}
+}
