@@ -724,3 +724,120 @@ func TestConfigShowAfterSet(t *testing.T) {
 		t.Errorf("config show did not reflect updated provider: %s", stdout)
 	}
 }
+
+func TestChatCommandWithPipedInput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode request: %v", err)
+				return
+			}
+
+			if len(request.Messages) != 1 {
+				t.Fatalf("message count = %d, want 1", len(request.Messages))
+			}
+
+			// Should contain both the prompt and piped input
+			content := request.Messages[0].Content
+			if !strings.Contains(content, "explain this error") {
+				t.Errorf("prompt missing from content: %s", content)
+			}
+
+			if !strings.Contains(content, "test failed: nil pointer") {
+				t.Errorf("piped input missing from content: %s", content)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{
+				"message": {
+					"role": "assistant",
+					"content": "The error is caused by a nil pointer dereference."
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+
+	path := writeTestConfig(t, server.URL, "test-model", "ollama")
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{
+		"--config", path,
+		"chat", "explain this error",
+	})
+
+	// Simulate piped stdin
+	pipedInput := "test failed: nil pointer"
+	cmd.SetIn(strings.NewReader(pipedInput))
+
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("chat command with piped input: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "nil pointer dereference") {
+		t.Errorf("unexpected output: %s", output)
+	}
+}
+
+func TestChatCommandPipedInputOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var request struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode request: %v", err)
+				return
+			}
+
+			content := request.Messages[0].Content
+			if content != "piped content only" {
+				t.Errorf("content = %q, want 'piped content only'", content)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{
+				"message": {
+					"role": "assistant",
+					"content": "Analyzed piped content."
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+
+	path := writeTestConfig(t, server.URL, "test-model", "ollama")
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{
+		"--config", path,
+		"chat",
+	})
+
+	cmd.SetIn(strings.NewReader("piped content only"))
+
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("chat command with piped input only: %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Analyzed piped content") {
+		t.Errorf("unexpected output: %s", output)
+	}
+}

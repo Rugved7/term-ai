@@ -16,6 +16,7 @@ import (
 	"github.com/Rugved7/termai/internal/provider/factory"
 	"github.com/Rugved7/termai/internal/provider/ollama"
 	"github.com/Rugved7/termai/internal/storage/sqlite"
+	"github.com/Rugved7/termai/internal/terminal"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -258,11 +259,13 @@ func newChatCmd() *cobra.Command {
 		Long: `Start an interactive conversation with an AI model.
 
 You can also provide a prompt directly to receive a one-shot response.
+Pipe command output directly into TermAI for quick analysis.
 
 Examples:
   termai chat
   termai chat "Explain goroutines"
   termai chat -m llama3.2:3b
+  go test ./... 2>&1 | termai chat "fix these failures"
   termai --config ./custom.yaml chat`,
 		Args: cobra.ArbitraryArgs,
 	}
@@ -308,11 +311,6 @@ func runChat(
 ) error {
 	ctx := cmd.Context()
 
-	// client, err := ollama.NewClient(cfg.Ollama.BaseURL)
-	// if err != nil {
-	// 	return fmt.Errorf("initialize Ollama client: %w", err)
-	// }
-
 	provider, err := factory.New(cfg)
 	if err != nil {
 		return err
@@ -320,12 +318,34 @@ func runChat(
 
 	slog.Debug(
 		"initialized provider",
+		"provider", cfg.Provider,
 		"model", model,
 	)
 
+	// Build prompt from args
 	prompt := strings.Join(args, " ")
 
-	// One-shot chat.
+	// Check for piped stdin
+	var pipedInput string
+	if terminal.IsPiped() {
+		slog.Debug("detected piped stdin, reading input")
+
+		pipedInput, err = terminal.ReadPipedInput(cmd.InOrStdin())
+		if err != nil {
+			return fmt.Errorf("read piped input: %w", err)
+		}
+
+		// Combine piped input with prompt
+		if prompt != "" {
+			prompt = prompt + "\n\n" + pipedInput
+		} else {
+			prompt = pipedInput
+		}
+
+		slog.Debug("piped input read", "bytes", len(pipedInput))
+	}
+
+	// One-shot chat (either explicit prompt or piped input)
 	if prompt != "" {
 		request := llm.ChatRequest{
 			Model: model,
@@ -340,13 +360,6 @@ func runChat(
 		chatCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
-		slog.Debug(
-			"initialized provider",
-			"provider", cfg.Provider,
-			"model", model,
-		)
-
-		// response, err := client.Chat(chatCtx, request)
 		response, err := provider.Chat(chatCtx, request)
 
 		if err != nil {
@@ -357,13 +370,18 @@ func runChat(
 			)
 		}
 
-		fmt.Fprintln(cmd.OutOrStdout(), "\nTermAI:")
-		fmt.Fprintln(cmd.OutOrStdout(), response.Message.Content)
+		// Plain output for non-interactive mode (piped or redirected)
+		if !terminal.IsInteractive() {
+			fmt.Fprintln(cmd.OutOrStdout(), response.Message.Content)
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "\nTermAI:")
+			fmt.Fprintln(cmd.OutOrStdout(), response.Message.Content)
+		}
 
 		return nil
 	}
 
-	// Interactive chat requires persistent storage.
+	// Interactive chat requires persistent storage
 	slog.Debug("initializing conversation storage")
 
 	store, err := sqlite.New(cfg.DataDir)
@@ -377,8 +395,6 @@ func runChat(
 		}
 	}()
 
-	// return startChat(ctx, client, model, store)
-	// return startChat(ctx, provider, model, store)
 	return startChat(ctx, provider, cfg.Provider, model, store)
 }
 
