@@ -42,9 +42,10 @@ func TestRunOnboardingGemini(t *testing.T) {
 
 	var output bytes.Buffer
 
+	// Skip API key entry by just pressing enter (empty key)
 	err := runOnboarding(
 		path,
-		strings.NewReader("2\n"),
+		strings.NewReader("2\n\n"),
 		&output,
 	)
 	if err != nil {
@@ -60,8 +61,14 @@ func TestRunOnboardingGemini(t *testing.T) {
 		t.Errorf("provider = %q, want gemini", cfg.Provider)
 	}
 
-	if !strings.Contains(output.String(), "GEMINI_API_KEY") {
+	outputStr := output.String()
+	if !strings.Contains(outputStr, "aistudio.google.com") {
 		t.Error("expected Gemini API key instructions in output")
+	}
+
+	// Should mention auth login command when key is skipped
+	if !strings.Contains(outputStr, "auth login") {
+		t.Error("expected auth login suggestion in output")
 	}
 }
 

@@ -323,7 +323,7 @@ func TestChatCommandUsesModelOverride(t *testing.T) {
 
 			if request.Messages[0].Content != "Explain dependency injection" {
 				t.Errorf(
-					"prompt = %q, want expected prompt",
+					"prompt = %q, want 'Explain dependency injection'",
 					request.Messages[0].Content,
 				)
 			}

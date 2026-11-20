@@ -8,13 +8,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Rugved7/termai/internal/config"
 	"github.com/Rugved7/termai/internal/llm"
 	"github.com/Rugved7/termai/internal/provider/factory"
+	"github.com/Rugved7/termai/internal/provider/gemini"
 	"github.com/Rugved7/termai/internal/provider/ollama"
+	"github.com/Rugved7/termai/internal/secrets"
 	"github.com/Rugved7/termai/internal/storage/sqlite"
 	"github.com/Rugved7/termai/internal/terminal"
 	"github.com/spf13/cobra"
@@ -62,6 +66,7 @@ func newRootCmd() *cobra.Command {
 		newModelsCmd(),
 		newChatCmd(),
 		newConfigCmd(),
+		newAuthCmd(),
 		newVersionCmd(),
 	)
 
@@ -325,7 +330,7 @@ func runChat(
 	// Build prompt from args
 	prompt := strings.Join(args, " ")
 
-	// Check for piped stdin
+	// Check for piped stdin (only if terminal stdin is actually piped)
 	var pipedInput string
 	if terminal.IsPiped() {
 		slog.Debug("detected piped stdin, reading input")
@@ -335,14 +340,17 @@ func runChat(
 			return fmt.Errorf("read piped input: %w", err)
 		}
 
-		// Combine piped input with prompt
-		if prompt != "" {
-			prompt = prompt + "\n\n" + pipedInput
-		} else {
-			prompt = pipedInput
-		}
+		// Only combine if we actually read something
+		if strings.TrimSpace(pipedInput) != "" {
+			// Combine piped input with prompt
+			if prompt != "" {
+				prompt = prompt + "\n\n" + pipedInput
+			} else {
+				prompt = pipedInput
+			}
 
-		slog.Debug("piped input read", "bytes", len(pipedInput))
+			slog.Debug("piped input read", "bytes", len(pipedInput))
+		}
 	}
 
 	// One-shot chat (either explicit prompt or piped input)
@@ -541,4 +549,257 @@ Examples:
 			return nil
 		},
 	}
+}
+
+// newAuthCmd creates the auth command and its subcommands
+func newAuthCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Manage authentication credentials",
+		Long:  `Manage API keys and authentication for cloud providers.`,
+	}
+
+	cmd.AddCommand(
+		newAuthLoginCmd(),
+		newAuthStatusCmd(),
+		newAuthLogoutCmd(),
+	)
+
+	return cmd
+}
+
+func newAuthLoginCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "login <provider>",
+		Short: "Login to a cloud provider",
+		Long: `Authenticate with a cloud provider by storing your API key securely.
+
+Supported providers:
+  - gemini: Google Gemini (requires API key from https://aistudio.google.com/apikey)
+
+Your API key is stored in your system keychain when possible, with a secure
+file fallback for headless systems. The key is validated before being saved.
+
+Examples:
+  termai auth login gemini`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			provider := args[0]
+
+			if provider != "gemini" {
+				return fmt.Errorf(
+					"unsupported provider %q: only 'gemini' is supported in v1",
+					provider,
+				)
+			}
+
+			return runAuthLogin(cmd, provider)
+		},
+	}
+}
+
+func newAuthStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show authentication status",
+		Long:  `Display which providers have stored credentials.`,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadAppConfig(cmd)
+			if err != nil {
+				return err
+			}
+
+			return runAuthStatus(cmd, cfg)
+		},
+	}
+}
+
+func newAuthLogoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout <provider>",
+		Short: "Logout from a cloud provider",
+		Long: `Remove stored credentials for a cloud provider.
+
+Examples:
+  termai auth logout gemini`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			provider := args[0]
+
+			if provider != "gemini" {
+				return fmt.Errorf("unsupported provider %q", provider)
+			}
+
+			cfg, err := loadAppConfig(cmd)
+			if err != nil {
+				return err
+			}
+
+			return runAuthLogout(cmd, cfg, provider)
+		},
+	}
+}
+
+func runAuthLogin(cmd *cobra.Command, provider string) error {
+	cfg, err := loadAppConfig(cmd)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Login to %s\n\n", provider)
+
+	// Get credential store
+	credentialsDir := filepath.Join(cfg.DataDir, "..", "credentials")
+	store := secrets.NewStore(credentialsDir)
+
+	// Check if already logged in
+	if store.Has(provider) {
+		fmt.Fprintf(
+			cmd.OutOrStdout(),
+			"You are already logged in to %s.\n",
+			provider,
+		)
+		fmt.Fprintf(
+			cmd.OutOrStdout(),
+			"Run 'termai auth logout %s' first to replace the key.\n",
+			provider,
+		)
+		return nil
+	}
+
+	// Prompt for API key
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"Get your API key from: https://aistudio.google.com/apikey\n\n",
+	)
+	fmt.Fprintf(cmd.OutOrStdout(), "Paste your API key (input hidden): ")
+
+	// Read password without echo
+	apiKey, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Fprintln(cmd.OutOrStdout()) // newline after hidden input
+
+	if err != nil {
+		return fmt.Errorf("read API key: %w", err)
+	}
+
+	apiKeyStr := strings.TrimSpace(string(apiKey))
+	if apiKeyStr == "" {
+		return errors.New("API key cannot be empty")
+	}
+
+	// Validate the key by attempting to list models
+	fmt.Fprintf(cmd.OutOrStdout(), "\nValidating API key...\n")
+
+	client, err := gemini.NewClient(apiKeyStr)
+	if err != nil {
+		return fmt.Errorf("initialize Gemini client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	_, err = client.Models(ctx)
+	if err != nil {
+		errMsg := err.Error()
+		
+		// Check for specific HTTP status codes in error message
+		if strings.Contains(errMsg, "400") || 
+		   strings.Contains(errMsg, "401") || 
+		   strings.Contains(errMsg, "403") {
+			return fmt.Errorf(
+				"API key was rejected by Gemini: %s\n"+
+					"Please verify your key at https://aistudio.google.com/apikey",
+				errMsg,
+			)
+		}
+		
+		if strings.Contains(errMsg, "429") {
+			// 429 means the key is valid, just rate limited
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Note: Rate limited (HTTP 429), but key is valid.\n",
+			)
+		} else if !strings.Contains(errMsg, "200") {
+			// Some other error
+			return fmt.Errorf("validate API key: %w", err)
+		}
+	}
+
+	// Store the key
+	if err := store.Set(provider, apiKeyStr); err != nil {
+		return fmt.Errorf("store API key: %w", err)
+	}
+
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"\n✓ Successfully logged in to %s\n",
+		provider,
+	)
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"  API key: %s\n",
+		secrets.MaskAPIKey(apiKeyStr),
+	)
+
+	return nil
+}
+
+func runAuthStatus(cmd *cobra.Command, cfg config.Config) error {
+	credentialsDir := filepath.Join(cfg.DataDir, "..", "credentials")
+	store := secrets.NewStore(credentialsDir)
+
+	providers := []string{"gemini"}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "Authentication Status:")
+	fmt.Fprintln(cmd.OutOrStdout())
+
+	hasAny := false
+
+	for _, provider := range providers {
+		if store.Has(provider) {
+			hasAny = true
+			key, _ := store.Get(provider)
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"  %s: ✓ Logged in (%s)\n",
+				provider,
+				secrets.MaskAPIKey(key),
+			)
+		}
+	}
+
+	if !hasAny {
+		fmt.Fprintln(cmd.OutOrStdout(), "  No stored credentials.")
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "Run 'termai auth login gemini' to get started.")
+	}
+
+	return nil
+}
+
+func runAuthLogout(cmd *cobra.Command, cfg config.Config, provider string) error {
+	credentialsDir := filepath.Join(cfg.DataDir, "..", "credentials")
+	store := secrets.NewStore(credentialsDir)
+
+	if !store.Has(provider) {
+		fmt.Fprintf(
+			cmd.OutOrStdout(),
+			"You are not logged in to %s\n",
+			provider,
+		)
+		return nil
+	}
+
+	if err := store.Delete(provider); err != nil {
+		return fmt.Errorf("delete credential: %w", err)
+	}
+
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"✓ Logged out from %s\n",
+		provider,
+	)
+
+	return nil
 }
